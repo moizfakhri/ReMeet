@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>ReMeet records your microphone during meetings so your side of the conversation can be transcribed on this Mac.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>ReMeet reads your calendar on this Mac to remind you to record a minute before a meeting and to name the recording after it. Nothing is changed or sent anywhere.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>ReMeet records call audio playing on this Mac so the other participants can be transcribed on this Mac.</string>
+</dict>
+</plist>

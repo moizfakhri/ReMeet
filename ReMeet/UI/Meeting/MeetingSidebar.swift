@@ -1,0 +1,579 @@
+import AppKit
+import ReMeetKit
+import SwiftUI
+
+struct MeetingSidebar: View {
+    @Environment(AppModel.self) private var model
+    @Binding var selection: SidebarSelection?
+    let search: String
+    @State private var renaming: MeetingItem?
+    @State private var renameText = ""
+    @State private var deleting: MeetingItem?
+    /// Open folder dropdowns, comma-separated ids ("*" = all, for snapshots). Remembered.
+    @AppStorage("sidebarExpandedFolders") private var expandedFolders = ""
+    /// Folder or date group ids whose "Show more" is on.
+    @State private var showingAll: Set<String> = []
+    /// The row a drag is hovering over, drawn highlighted.
+    @State private var dropTarget: String?
+    @State private var folderEditor: FolderEditor?
+    @State private var deletingFolder: MeetingCollection?
+
+    var body: some View {
+        // Selection is drawn as the Fern "mark" (soft accent tint, accent title, readable meta
+        // line) instead of the system highlight, whose white text on the dark-mode green was
+        // 2.2:1. Arrow keys still move the selection.
+        List {
+            folderSection
+            if model.recorder.isRecording {
+                LiveRow()
+                    .padding(.vertical, 5)
+                    .padding(.horizontal, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { select(.live) }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+            }
+            ForEach(groups, id: \.0) { group, items in
+                let list = shown(items, limit: SidebarList.groupLimit, id: group.rawValue)
+                Section(group.rawValue) {
+                    ForEach(list.rows) { item in
+                        meetingRow(item)
+                            // Dropping on the list outside the folders takes a recording out.
+                            .dropDestination(for: String.self) { drops, _ in
+                                drop(drops, intoFolder: nil)
+                            } isTargeted: { dropTarget = $0 ? item.id : (dropTarget == item.id ? nil : dropTarget) }
+                    }
+                    showMoreRow(id: group.rawValue, hidden: list.hidden, total: items.count, limit: SidebarList.groupLimit)
+                }
+            }
+            if groups.isEmpty, search.isEmpty, hasFiledMeetings {
+                // Everything is in folders: still somewhere to drag a recording out to.
+                Text("Drag a recording here to take it out of its folder.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.fg2)
+                    .sidebarRow(selected: dropTarget == "unfiled") {}
+                    .dropDestination(for: String.self) { drops, _ in
+                        drop(drops, intoFolder: nil)
+                    } isTargeted: { dropTarget = $0 ? "unfiled" : (dropTarget == "unfiled" ? nil : dropTarget) }
+            }
+        }
+        .listStyle(.sidebar)
+        .transaction { $0.disablesAnimations = true }
+        .focusable()
+        .focusEffectDisabled()
+        .onKeyPress(.downArrow) { move(1) }
+        .onKeyPress(.upArrow) { move(-1) }
+        // A meeting opened from elsewhere (menu bar, notification) shows inside its folder.
+        .onChange(of: selection) { _, next in
+            guard case .meeting(let folder) = next,
+                  let id = model.library.item(for: folder)?.meta.collectionID else { return }
+            setExpanded(id, true)
+        }
+        .task(id: search) {
+            // Debounced: a search runs 150 ms after the last keystroke.
+            try? await Task.sleep(for: .milliseconds(search.isEmpty ? 0 : 150))
+            guard !Task.isCancelled else { return }
+            await model.runSearch(search)
+        }
+        .overlay {
+            if !search.isEmpty && groups.isEmpty {
+                ContentUnavailableView.search(text: search)
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            HStack {
+                Button {
+                    model.openSettings()
+                } label: {
+                    Label("Settings", systemImage: "gear")
+                        .hitTarget(6)
+                }
+                .buttonStyle(.plain)
+                Spacer()
+                ShortcutHint("⌘,")
+            }
+            .font(.callout)
+            .foregroundStyle(Theme.fg2)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+        }
+        .alert("Rename meeting", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+            TextField("Title", text: $renameText)
+            Button("Rename") {
+                if let renaming { model.library.rename(renaming.folder, to: renameText) }
+                renaming = nil
+            }
+            Button("Cancel", role: .cancel) { renaming = nil }
+        }
+        .alert("Could not import", isPresented: Binding(
+            get: { model.importNotice != nil },
+            set: { if !$0 { model.importNotice = nil } }
+        )) {
+            Button("OK", role: .cancel) { model.importNotice = nil }
+        } message: {
+            Text(model.importNotice ?? "")
+        }
+        .onChange(of: model.sidebarRequest) { _, request in
+            guard let request else { return }
+            model.sidebarRequest = nil
+            switch request {
+            case .rename(let folder):
+                if let item = model.library.item(for: folder) {
+                    renameText = item.meta.title
+                    renaming = item
+                }
+            case .trash(let folder):
+                deleting = model.library.item(for: folder)
+            case .newFolder:
+                folderEditor = FolderEditor(collection: nil)
+            }
+        }
+        .sheet(item: $folderEditor) { editor in
+            FolderEditorSheet(editor: editor) { name, context in
+                if let id = editor.collection?.id {
+                    model.library.updateCollection(id, name: name, context: context)
+                } else if let created = model.library.createCollection(named: name) {
+                    model.library.updateCollection(created.id, context: context)
+                    if let meeting = editor.moving { model.library.move(meeting, to: created.id) }
+                    setExpanded(created.id, true)
+                }
+            }
+        }
+        .confirmationDialog("Delete this folder?",
+                            isPresented: Binding(get: { deletingFolder != nil }, set: { if !$0 { deletingFolder = nil } }),
+                            presenting: deletingFolder) { folder in
+            Button("Delete Folder", role: .destructive) {
+                model.library.deleteCollection(folder.id)
+                deletingFolder = nil
+            }
+        } message: { folder in
+            Text("\u{201C}\(folder.name)\u{201D} and its context are removed. Its recordings stay, back in the main list.")
+        }
+        .confirmationDialog("Move this meeting to the Trash?",
+                            isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }),
+                            presenting: deleting) { item in
+            Button("Move to Trash", role: .destructive) {
+                let wasSelected = selection == .meeting(item.folder)
+                if (try? model.library.moveToTrash(item.folder)) != nil, wasSelected {
+                    selection = model.library.items.first.map { .meeting($0.folder) }
+                }
+                deleting = nil
+            }
+        } message: { item in
+            Text("\u{201C}\(item.meta.title)\u{201D}, its audio, transcript and summary go to the Trash. You can put them back from there.")
+        }
+    }
+
+    private var hasFiledMeetings: Bool {
+        let known = Set(model.library.collections.map(\.id))
+        guard !known.isEmpty else { return false }
+        return model.library.items.contains { item in
+            !(model.recorder.isRecording && model.recorder.folder == item.folder)
+                && item.meta.collectionID.map(known.contains) == true
+        }
+    }
+
+    private var groups: [(MeetingGroup, [MeetingItem])] {
+        var items = model.library.items.filter { item in
+            !(model.recorder.isRecording && model.recorder.folder == item.folder)
+        }
+        if !search.isEmpty, let hits = model.searchHits {
+            // Search looks everywhere, folders included.
+            let ids = Set(hits.map(\.id))
+            items = items.filter { ids.contains($0.id) }
+        } else {
+            // A recording in a folder lives under that folder's dropdown, not here too.
+            let known = Set(model.library.collections.map(\.id))
+            items = items.filter { item in item.meta.collectionID.map { !known.contains($0) } ?? true }
+        }
+        return MeetingGroup.grouped(items, date: { $0.meta.startTime }, now: Date())
+    }
+
+    /// Selection changes are not animated. An implicit animation here stretches the
+    /// detail column while the next meeting loads, which is the jump between rows.
+    private func select(_ next: SidebarSelection) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { selection = next }
+    }
+
+    /// Arrow keys: next / previous meeting in the order shown.
+    private func move(_ delta: Int) -> KeyPress.Result {
+        var order: [SidebarSelection] = model.recorder.isRecording ? [.live] : []
+        if search.isEmpty {
+            for folder in model.library.collections where isExpanded(folder.id) {
+                let rows = shown(meetings(in: folder), limit: SidebarList.folderLimit, id: folder.id).rows
+                order += rows.map { .meeting($0.folder) }
+            }
+        }
+        for (group, items) in groups {
+            order += shown(items, limit: SidebarList.groupLimit, id: group.rawValue).rows.map { .meeting($0.folder) }
+        }
+        guard !order.isEmpty else { return .ignored }
+        let index = selection.flatMap { order.firstIndex(of: $0) } ?? (delta > 0 ? -1 : order.count)
+        select(order[min(max(index + delta, 0), order.count - 1)])
+        return .handled
+    }
+
+    private var snippets: [String: String] {
+        guard !search.isEmpty, let hits = model.searchHits else { return [:] }
+        return Dictionary(hits.map { ($0.id, $0.snippet) }, uniquingKeysWith: { a, _ in a })
+    }
+
+    // MARK: - Rows
+
+    private func meetingRow(_ item: MeetingItem, indent: CGFloat = 0) -> some View {
+        let isSelected = selection == .meeting(item.folder)
+        return MeetingRow(item: item, isProcessing: model.queue.isWorking(on: item.folder),
+                          snippet: snippets[item.id], isSelected: isSelected)
+            .padding(.leading, indent)
+            .sidebarRow(selected: isSelected || dropTarget == item.id) { select(.meeting(item.folder)) }
+            .animation(nil, value: isSelected)
+            .contextMenu { contextMenu(item) }
+            .draggable(SidebarDrag.meeting(item.folder.url.path).payload) {
+                Text(item.meta.title)
+                    .font(.system(size: 13, weight: .medium))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Theme.mark, in: RoundedRectangle(cornerRadius: 8))
+            }
+    }
+
+    private func shown(_ items: [MeetingItem], limit: Int, id: String) -> (rows: [MeetingItem], hidden: Int) {
+        SidebarList.visible(items, limit: limit, showAll: showingAll.contains(id)) { selection == .meeting($0.folder) }
+    }
+
+    /// "Show 4 more" / "Show less", when a list is longer than its limit.
+    @ViewBuilder private func showMoreRow(id: String, hidden: Int, total: Int, limit: Int, indent: CGFloat = 0) -> some View {
+        if hidden > 0 || (showingAll.contains(id) && total > limit) {
+            Button {
+                if showingAll.contains(id) { showingAll.remove(id) } else { showingAll.insert(id) }
+            } label: {
+                Text(hidden > 0 ? "Show \(hidden) more" : "Show less")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.accent)
+                    .padding(.vertical, 3)
+                    .padding(.leading, 10 + indent)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+        }
+    }
+
+    /// Handles a drop: recordings go into `folder` (nil = out of any folder). Folder drags
+    /// only count on another folder, handled in `folderRow`.
+    private func drop(_ payloads: [String], intoFolder folder: String?) -> Bool {
+        var handled = false
+        for payload in payloads {
+            guard case .meeting(let path) = SidebarDrag(payload: payload),
+                  let item = model.library.items.first(where: { $0.folder.url.path == path }) else { continue }
+            if item.meta.collectionID != folder { model.library.move(item.folder, to: folder) }
+            handled = true
+        }
+        if handled, let folder { setExpanded(folder, true) }
+        return handled
+    }
+
+    // MARK: - Folders
+
+    private func isExpanded(_ id: String) -> Bool {
+        expandedFolders == "*" || expandedFolders.split(separator: ",").contains(Substring(id))
+    }
+
+    private func setExpanded(_ id: String, _ open: Bool) {
+        var ids = expandedFolders.split(separator: ",").map(String.init).filter { $0 != "*" }
+        ids.removeAll { $0 == id }
+        if open { ids.append(id) }
+        expandedFolders = ids.joined(separator: ",")
+    }
+
+    private func meetings(in folder: MeetingCollection) -> [MeetingItem] {
+        model.library.items.filter { item in
+            item.meta.collectionID == folder.id && !(model.recorder.isRecording && model.recorder.folder == item.folder)
+        }
+    }
+
+    @ViewBuilder private var folderSection: some View {
+        // While searching, results are a flat list across folders.
+        if search.isEmpty {
+            Section("Folders") {
+                ForEach(model.library.collections) { folder in
+                    folderRow(folder)
+                    if isExpanded(folder.id) {
+                        FolderContextCard(folder: folder) { folderEditor = FolderEditor(collection: folder) }
+                            .listRowInsets(EdgeInsets(top: 2, leading: 42, bottom: 4, trailing: 12))
+                            .listRowBackground(Color.clear)
+                        let items = meetings(in: folder)
+                        let list = shown(items, limit: SidebarList.folderLimit, id: folder.id)
+                        ForEach(list.rows) { item in
+                            meetingRow(item, indent: 24)
+                                .dropDestination(for: String.self) { drops, _ in
+                                    drop(drops, intoFolder: folder.id)
+                                } isTargeted: { dropTarget = $0 ? item.id : (dropTarget == item.id ? nil : dropTarget) }
+                        }
+                        showMoreRow(id: folder.id, hidden: list.hidden, total: items.count, limit: SidebarList.folderLimit, indent: 24)
+                    }
+                }
+                Button {
+                    model.importMeetingAudioChosen()
+                } label: {
+                    Label("Import Audio", systemImage: "square.and.arrow.down")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Theme.fg2)
+                        .padding(.vertical, 3)
+                        .padding(.horizontal, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+                Button {
+                    folderEditor = FolderEditor(collection: nil)
+                } label: {
+                    Label("New Folder", systemImage: "plus")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Theme.fg2)
+                        .padding(.vertical, 3)
+                        .padding(.horizontal, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+            }
+        }
+    }
+
+    /// A folder: click to open or close its dropdown, drop recordings on it, drag it to reorder.
+    private func folderRow(_ folder: MeetingCollection) -> some View {
+        let open = isExpanded(folder.id)
+        let target = dropTarget == "folder-\(folder.id)"
+        return HStack(spacing: 6) {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Theme.fg2)
+                .rotationEffect(.degrees(open ? 90 : 0))
+                .frame(width: 12)
+            Image(systemName: open ? "folder.fill" : "folder")
+                .foregroundStyle(target ? Theme.accent : Theme.fg2)
+                .frame(width: 18)
+            Text(folder.name)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(target ? Theme.accent : Theme.fg)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Text("\(meetings(in: folder).count)")
+                .font(.system(size: 11.5).monospacedDigit())
+                .foregroundStyle(Theme.fg2)
+        }
+        .sidebarRow(selected: target) { setExpanded(folder.id, !open) }
+        .accessibilityValue(open ? "Expanded" : "Collapsed")
+        .contextMenu {
+            Button("Edit Name and Context…") { folderEditor = FolderEditor(collection: folder) }
+            Divider()
+            Button("Delete Folder…", role: .destructive) { deletingFolder = folder }
+        }
+        .draggable(SidebarDrag.collection(folder.id).payload) {
+            Label(folder.name, systemImage: "folder")
+                .font(.system(size: 13, weight: .medium))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Theme.mark, in: RoundedRectangle(cornerRadius: 8))
+        }
+        .dropDestination(for: String.self) { drops, _ in
+            var handled = drop(drops, intoFolder: folder.id)
+            for payload in drops {
+                if case .collection(let moving) = SidebarDrag(payload: payload) {
+                    model.library.moveCollection(moving, before: folder.id)
+                    handled = true
+                }
+            }
+            return handled
+        } isTargeted: { over in
+            let id = "folder-\(folder.id)"
+            dropTarget = over ? id : (dropTarget == id ? nil : dropTarget)
+        }
+    }
+
+    @ViewBuilder private func contextMenu(_ item: MeetingItem) -> some View {
+        Button("Rename…") {
+            renameText = item.meta.title
+            renaming = item
+        }
+        Menu("Move to Folder") {
+            Button("No Folder") { model.library.move(item.folder, to: nil) }
+                .disabled(item.meta.collectionID == nil)
+            if !model.library.collections.isEmpty { Divider() }
+            ForEach(model.library.collections) { folder in
+                Button(folder.name) { model.library.move(item.folder, to: folder.id) }
+                    .disabled(item.meta.collectionID == folder.id)
+            }
+            Divider()
+            Button("New Folder…") { folderEditor = FolderEditor(collection: nil, moving: item.folder) }
+        }
+        Button("Copy for AI") {
+            Task { await AIClipboard.copy(item.folder) }
+        }
+        Button("Reveal in Finder") {
+            NSWorkspace.shared.activateFileViewerSelecting([item.folder.url])
+        }
+        Button("Reprocess") {
+            model.reprocess(item.folder)
+        }
+        .disabled(item.meta.status == .recording)
+        Divider()
+        Button("Delete…", role: .destructive) { deleting = item }
+            .disabled(item.meta.status == .recording)
+    }
+}
+
+private struct LiveRow: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle().fill(Theme.recording).frame(width: 7, height: 7)
+            Text(model.recorder.title)
+                .font(.system(size: 12.5, weight: .semibold))
+                .lineLimit(1)
+            Spacer()
+            Text(TimeFormat.clock(model.recorder.elapsed))
+                .font(Fonts.monoSmall)
+                .foregroundStyle(Theme.fg2)
+        }
+        .padding(.vertical, 3)
+        .listRowBackground(RoundedRectangle(cornerRadius: 8).fill(Theme.recording.opacity(0.10)).padding(.horizontal, 6))
+    }
+}
+
+struct MeetingRow: View {
+    let item: MeetingItem
+    var isProcessing = false
+    var snippet: String?
+    var isSelected = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(item.meta.title)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(isSelected ? Theme.accent : Theme.fg)
+                .lineLimit(1)
+            // Date, start time and length on every row; while processing, the status gets
+            // its own line so neither is cut off in a narrow sidebar.
+            HStack(spacing: 6) {
+                Text(timeText)
+                if item.meta.effectiveDuration > 0 {
+                    Text("·")
+                    Text(TimeFormat.duration(item.meta.effectiveDuration))
+                }
+            }
+            .lineLimit(1)
+            .font(.system(size: 11.5))
+            .foregroundStyle(Theme.fg2)
+            if item.meta.status != .summarized {
+                HStack(spacing: 6) {
+                    if isProcessing { ProgressView().controlSize(.mini) }
+                    MeetingStatusText(meta: item.meta)
+                }
+                .lineLimit(1)
+                .font(.system(size: 11.5))
+                .foregroundStyle(Theme.fg2)
+            }
+            if let snippet, !snippet.isEmpty {
+                Text(snippet)
+                    .font(.system(size: 11.5))
+                    // fg3 on the selected mark misses AA (~4.0); fg2 stays readable on mark and surface.
+                    .foregroundStyle(isSelected ? Theme.fg2 : Theme.fg3)
+                    .lineLimit(2)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// "Mon, Nov 3, 2:06 PM" (the year only when it is not this year).
+    private var timeText: String {
+        let date = item.meta.startTime
+        let thisYear = Calendar.current.isDate(date, equalTo: Date(), toGranularity: .year)
+        let day = thisYear ? date.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+                           : date.formatted(.dateTime.month(.abbreviated).day().year())
+        return "\(day), \(date.formatted(date: .omitted, time: .shortened))"
+    }
+}
+
+/// New folder (optionally for a meeting being moved) or editing one.
+struct FolderEditor: Identifiable {
+    let id = UUID()
+    var collection: MeetingCollection?
+    var moving: MeetingFolder?
+}
+
+private struct FolderEditorSheet: View {
+    let editor: FolderEditor
+    let save: (String, String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+    @State private var context = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(editor.collection == nil ? "New Folder" : "Edit Folder")
+                .font(.headline)
+            TextField("Name, e.g. Projects", text: $name)
+                .textFieldStyle(.roundedBorder)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Context").font(.subheadline.weight(.semibold))
+                TextEditor(text: $context)
+                    .font(.body)
+                    .frame(minHeight: 110)
+                    .scrollContentBackground(.hidden)
+                    .padding(6)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.line))
+                Text("Who is who, the project, terms and acronyms. Added to the summaries of meetings in this folder and to Copy for AI.")
+                    .font(.caption).foregroundStyle(Theme.fg2)
+            }
+            HStack {
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button(editor.collection == nil ? "Create" : "Save") {
+                    save(name, context)
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.glassProminent)
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
+        .onAppear {
+            name = editor.collection?.name ?? ""
+            context = editor.collection?.context ?? ""
+        }
+    }
+}
+
+/// Under the selected folder: its context, or a prompt to add one.
+private struct FolderContextCard: View {
+    let folder: MeetingCollection
+    let edit: () -> Void
+
+    var body: some View {
+        Button(action: edit) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(folder.context.isEmpty ? "Add context for this folder…" : folder.context)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.fg2)
+                    .lineLimit(3)
+                    .multilineTextAlignment(.leading)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("Edit the name and context of \u{201C}\(folder.name)\u{201D}")
+    }
+}

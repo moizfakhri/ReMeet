@@ -1,0 +1,61 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Xcode build output
+build/
+DerivedData/
+*.xcarchive
+*.ipa
+*.dSYM
+*.dSYM.zip
+*.app
+
+# Xcode per-user state
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.hmap
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Packages/*/.build/
+
+# Model weights (downloaded at runtime, never committed)
+*.gguf
+*.safetensors
+*.mlmodel
+*.mlmodelc/
+*.mlpackage/
+*.onnx
+*.pt
+*.pth
+*.ckpt
+*.bin
+
+# Recordings and meeting data
+*.wav
+*.m4a
+*.caf
+*.aiff
+*.aif
+*.mp3
+*.flac
+*.opus
+
+# Secrets and local config
+.env
+.env.*
+*.p12
+*.mobileprovision
+*.provisionprofile
+
+# Editors
+.vscode/
+.idea/
+*.swp

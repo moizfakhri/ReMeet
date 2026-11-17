@@ -1,0 +1,87 @@
+{
+  "app" : "ReMeet Phase 0 capture spike",
+  "clock" : "Both files start at startHostTime (mach_absolute_time). Sample N of either file is startTime + N/48000 s.",
+  "devices" : {
+    "finalInput" : {
+      "id" : 88,
+      "name" : "MacBook Pro Microphone",
+      "nominalSampleRate" : 48000,
+      "uid" : "BuiltInMicrophoneDevice"
+    },
+    "finalOutput" : {
+      "id" : 81,
+      "name" : "MacBook Pro Speakers",
+      "nominalSampleRate" : 48000,
+      "uid" : "BuiltInSpeakerDevice"
+    },
+    "initialInput" : {
+      "id" : 88,
+      "name" : "MacBook Pro Microphone",
+      "nominalSampleRate" : 48000,
+      "uid" : "BuiltInMicrophoneDevice"
+    },
+    "initialOutput" : {
+      "id" : 81,
+      "name" : "MacBook Pro Speakers",
+      "nominalSampleRate" : 48000,
+      "uid" : "BuiltInSpeakerDevice"
+    }
+  },
+  "durationSeconds" : 27.039911031723022,
+  "endTime" : "2026-11-02T22:53:17.899Z",
+  "events" : [
+    {
+      "detail" : "MacBook Pro Microphone at 48000 Hz, 1 ch",
+      "offsetSeconds" : 0.152,
+      "time" : "2026-11-02T22:52:51.011Z",
+      "type" : "mic_started"
+    },
+    {
+      "detail" : "clocked by MacBook Pro Speakers, tap at 48000 Hz, 1 ch",
+      "offsetSeconds" : 1.73,
+      "time" : "2026-11-02T22:52:52.589Z",
+      "type" : "system_tap_started"
+    },
+    {
+      "detail" : "mic 26.9 s, system 27.0 s written",
+      "offsetSeconds" : 27.044,
+      "time" : "2026-11-02T22:53:17.903Z",
+      "type" : "recording_stopped"
+    }
+  ],
+  "mic" : {
+    "driftTrimmedSeconds" : 0,
+    "droppedChunks" : 0,
+    "durationSeconds" : 26.948916666666666,
+    "fileFormat" : "WAV, 48000 Hz, mono, 16-bit PCM",
+    "fileName" : "mic.wav",
+    "framesWritten" : 1293548,
+    "gaps" : [
+
+    ],
+    "silenceInsertedSeconds" : 0.14891666666666667,
+    "sourceSampleRates" : [
+      48000
+    ]
+  },
+  "startHostTime" : 3599260246964,
+  "startTime" : "2026-11-02T22:52:50.859Z",
+  "system" : {
+    "driftTrimmedSeconds" : 0,
+    "droppedChunks" : 0,
+    "durationSeconds" : 27.033,
+    "fileFormat" : "WAV, 48000 Hz, mono, 16-bit PCM",
+    "fileName" : "system.wav",
+    "framesWritten" : 1297584,
+    "gaps" : [
+      {
+        "atSeconds" : 0,
+        "durationSeconds" : 1.7423333333333333
+      }
+    ],
+    "silenceInsertedSeconds" : 1.7423333333333333,
+    "sourceSampleRates" : [
+      48000
+    ]
+  }
+}
