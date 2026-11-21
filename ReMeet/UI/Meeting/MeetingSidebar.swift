@@ -35,15 +35,20 @@ struct MeetingSidebar: View {
             }
             ForEach(groups, id: \.0) { group, items in
                 let list = shown(items, limit: SidebarList.groupLimit, id: group.rawValue)
-                Section(group.rawValue) {
+                Section {
                     ForEach(list.rows) { item in
-                        meetingRow(item)
+                        meetingRow(item, isTodayGroup: group == .today)
                             // Dropping on the list outside the folders takes a recording out.
                             .dropDestination(for: String.self) { drops, _ in
                                 drop(drops, intoFolder: nil)
                             } isTargeted: { dropTarget = $0 ? item.id : (dropTarget == item.id ? nil : dropTarget) }
                     }
                     showMoreRow(id: group.rawValue, hidden: list.hidden, total: items.count, limit: SidebarList.groupLimit)
+                } header: {
+                    Text(group.rawValue)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.fg3)
+                        .textCase(nil)
                 }
             }
             if groups.isEmpty, search.isEmpty, hasFiledMeetings {
@@ -81,21 +86,41 @@ struct MeetingSidebar: View {
             }
         }
         .safeAreaInset(edge: .bottom) {
-            HStack {
-                Button {
-                    model.openSettings()
-                } label: {
-                    Label("Settings", systemImage: "gear")
+            VStack(spacing: 0) {
+                Divider()
+                HStack(spacing: 12) {
+                    Button {
+                        model.importMeetingAudioChosen()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "square.and.arrow.down")
+                                .font(.system(size: 12))
+                            Text("Import")
+                        }
+                        .foregroundStyle(Theme.fg2)
                         .hitTarget(6)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Import an existing audio recording to transcribe and summarize")
+                    Spacer()
+                    Button {
+                        model.openSettings()
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "gearshape")
+                                .font(.system(size: 12))
+                            Text("Settings")
+                        }
+                        .foregroundStyle(Theme.fg2)
+                        .hitTarget(6)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Settings (⌘,)")
                 }
-                .buttonStyle(.plain)
-                Spacer()
-                ShortcutHint("⌘,")
+                .font(.system(size: 12.5))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
             }
-            .font(.callout)
-            .foregroundStyle(Theme.fg2)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
         }
         .alert("Rename meeting", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("Title", text: $renameText)
@@ -129,11 +154,11 @@ struct MeetingSidebar: View {
             }
         }
         .sheet(item: $folderEditor) { editor in
-            FolderEditorSheet(editor: editor) { name, context in
+            FolderEditorSheet(editor: editor) { name, context, exportPath in
                 if let id = editor.collection?.id {
-                    model.library.updateCollection(id, name: name, context: context)
-                } else if let created = model.library.createCollection(named: name) {
-                    model.library.updateCollection(created.id, context: context)
+                    model.library.updateCollection(id, name: name, context: context, exportDirectoryPath: .some(exportPath))
+                } else if let created = model.library.createCollection(named: name, context: context,
+                                                                       exportDirectoryPath: exportPath) {
                     if let meeting = editor.moving { model.library.move(meeting, to: created.id) }
                     setExpanded(created.id, true)
                 }
@@ -222,10 +247,11 @@ struct MeetingSidebar: View {
 
     // MARK: - Rows
 
-    private func meetingRow(_ item: MeetingItem, indent: CGFloat = 0) -> some View {
+    private func meetingRow(_ item: MeetingItem, indent: CGFloat = 0, isTodayGroup: Bool = false) -> some View {
         let isSelected = selection == .meeting(item.folder)
         return MeetingRow(item: item, isProcessing: model.queue.isWorking(on: item.folder),
-                          snippet: snippets[item.id], isSelected: isSelected)
+                          snippet: snippets[item.id], isSelected: isSelected,
+                          omitDateIfToday: isTodayGroup)
             .padding(.leading, indent)
             .sidebarRow(selected: isSelected || dropTarget == item.id) { select(.meeting(item.folder)) }
             .animation(nil, value: isSelected)
@@ -289,65 +315,69 @@ struct MeetingSidebar: View {
         expandedFolders = ids.joined(separator: ",")
     }
 
-    private func meetings(in folder: MeetingCollection) -> [MeetingItem] {
-        model.library.items.filter { item in
-            item.meta.collectionID == folder.id && !(model.recorder.isRecording && model.recorder.folder == item.folder)
+    private var meetingsByCollection: [String: [MeetingItem]] {
+        let liveFolder = model.recorder.isRecording ? model.recorder.folder : nil
+        var map: [String: [MeetingItem]] = [:]
+        for item in model.library.items where item.folder != liveFolder {
+            if let cid = item.meta.collectionID {
+                map[cid, default: []].append(item)
+            }
         }
+        return map
+    }
+
+    private func meetings(in folder: MeetingCollection) -> [MeetingItem] {
+        meetingsByCollection[folder.id] ?? []
     }
 
     @ViewBuilder private var folderSection: some View {
         // While searching, results are a flat list across folders.
         if search.isEmpty {
-            Section("Folders") {
+            let byFolder = meetingsByCollection
+            Section {
                 ForEach(model.library.collections) { folder in
-                    folderRow(folder)
+                    let items = byFolder[folder.id] ?? []
+                    folderRow(folder, count: items.count)
                     if isExpanded(folder.id) {
                         FolderContextCard(folder: folder) { folderEditor = FolderEditor(collection: folder) }
-                            .listRowInsets(EdgeInsets(top: 2, leading: 42, bottom: 4, trailing: 12))
+                            .listRowInsets(EdgeInsets(top: 2, leading: 32, bottom: 4, trailing: 10))
                             .listRowBackground(Color.clear)
-                        let items = meetings(in: folder)
                         let list = shown(items, limit: SidebarList.folderLimit, id: folder.id)
                         ForEach(list.rows) { item in
-                            meetingRow(item, indent: 24)
+                            meetingRow(item, indent: 20)
                                 .dropDestination(for: String.self) { drops, _ in
                                     drop(drops, intoFolder: folder.id)
                                 } isTargeted: { dropTarget = $0 ? item.id : (dropTarget == item.id ? nil : dropTarget) }
                         }
-                        showMoreRow(id: folder.id, hidden: list.hidden, total: items.count, limit: SidebarList.folderLimit, indent: 24)
+                        showMoreRow(id: folder.id, hidden: list.hidden, total: items.count, limit: SidebarList.folderLimit, indent: 20)
                     }
                 }
-                Button {
-                    model.importMeetingAudioChosen()
-                } label: {
-                    Label("Import Audio", systemImage: "square.and.arrow.down")
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(Theme.fg2)
-                        .padding(.vertical, 3)
-                        .padding(.horizontal, 10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
+            } header: {
+                HStack(spacing: 6) {
+                    Text("Folders")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.fg3)
+                        .textCase(nil)
+                    Spacer()
+                    Button {
+                        folderEditor = FolderEditor(collection: nil)
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.fg2)
+                            .frame(width: 20, height: 18)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("New Folder (⇧⌘N)")
+                    .accessibilityLabel("New Folder")
                 }
-                .buttonStyle(.plain)
-                .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
-                Button {
-                    folderEditor = FolderEditor(collection: nil)
-                } label: {
-                    Label("New Folder", systemImage: "plus")
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(Theme.fg2)
-                        .padding(.vertical, 3)
-                        .padding(.horizontal, 10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
             }
         }
     }
 
     /// A folder: click to open or close its dropdown, drop recordings on it, drag it to reorder.
-    private func folderRow(_ folder: MeetingCollection) -> some View {
+    private func folderRow(_ folder: MeetingCollection, count: Int) -> some View {
         let open = isExpanded(folder.id)
         let target = dropTarget == "folder-\(folder.id)"
         return HStack(spacing: 6) {
@@ -364,14 +394,31 @@ struct MeetingSidebar: View {
                 .foregroundStyle(target ? Theme.accent : Theme.fg)
                 .lineLimit(1)
             Spacer(minLength: 4)
-            Text("\(meetings(in: folder).count)")
+            if let exportPath = folder.exportDirectoryPath {
+                Image(systemName: "arrow.down.doc")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Theme.accent)
+                    .help("Auto-exporting .md files to \(exportPath.replacingOccurrences(of: NSHomeDirectory(), with: "~"))")
+            }
+            Text("\(count)")
                 .font(.system(size: 11.5).monospacedDigit())
                 .foregroundStyle(Theme.fg2)
         }
         .sidebarRow(selected: target) { setExpanded(folder.id, !open) }
         .accessibilityValue(open ? "Expanded" : "Collapsed")
         .contextMenu {
-            Button("Edit Name and Context…") { folderEditor = FolderEditor(collection: folder) }
+            Button("Edit Folder & AI Export…") { folderEditor = FolderEditor(collection: folder) }
+            if let exportPath = folder.exportDirectoryPath {
+                Button("Export All Meetings Now") {
+                    model.syncCollectionExports(folder)
+                }
+                Button("Open Export Folder in Finder") {
+                    let expanded = (exportPath as NSString).expandingTildeInPath
+                    let url = URL(fileURLWithPath: expanded, isDirectory: true)
+                    try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                    NSWorkspace.shared.open(url)
+                }
+            }
             Divider()
             Button("Delete Folder…", role: .destructive) { deletingFolder = folder }
         }
@@ -416,6 +463,14 @@ struct MeetingSidebar: View {
         Button("Copy for AI") {
             Task { await AIClipboard.copy(item.folder) }
         }
+        Button("Export Markdown…") {
+            model.exportMarkdownOneOff(item.folder)
+        }
+        if let exported = item.meta.exportedMarkdownPath, !exported.isEmpty {
+            Button("Reveal Exported .md") {
+                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: exported)])
+            }
+        }
         Button("Reveal in Finder") {
             NSWorkspace.shared.activateFileViewerSelecting([item.folder.url])
         }
@@ -453,19 +508,19 @@ struct MeetingRow: View {
     var isProcessing = false
     var snippet: String?
     var isSelected = false
+    var omitDateIfToday = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 1) {
+        VStack(alignment: .leading, spacing: 2) {
             Text(item.meta.title)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(isSelected ? Theme.accent : Theme.fg)
                 .lineLimit(1)
-            // Date, start time and length on every row; while processing, the status gets
-            // its own line so neither is cut off in a narrow sidebar.
-            HStack(spacing: 6) {
+            // Compact date/time and length so nothing truncates in a 240 pt sidebar.
+            HStack(spacing: 5) {
                 Text(timeText)
                 if item.meta.effectiveDuration > 0 {
-                    Text("·")
+                    Text("·").foregroundStyle(Theme.fg3)
                     Text(TimeFormat.duration(item.meta.effectiveDuration))
                 }
             }
@@ -473,7 +528,7 @@ struct MeetingRow: View {
             .font(.system(size: 11.5))
             .foregroundStyle(Theme.fg2)
             if item.meta.status != .summarized {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     if isProcessing { ProgressView().controlSize(.mini) }
                     MeetingStatusText(meta: item.meta)
                 }
@@ -492,13 +547,36 @@ struct MeetingRow: View {
         .padding(.vertical, 2)
     }
 
-    /// "Mon, Nov 3, 2:06 PM" (the year only when it is not this year).
+    private static let timeOnlyFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .none
+        f.timeStyle = .short
+        return f
+    }()
+
+    private static let thisYearFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "MMM d, h:mm a"
+        return f
+    }()
+
+    private static let otherYearFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "MMM d, yyyy"
+        return f
+    }()
+
+    /// Compact, non-truncating timestamp: "11:00 AM" under Today, "Nov 18, 11:00 AM" this year.
     private var timeText: String {
         let date = item.meta.startTime
-        let thisYear = Calendar.current.isDate(date, equalTo: Date(), toGranularity: .year)
-        let day = thisYear ? date.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
-                           : date.formatted(.dateTime.month(.abbreviated).day().year())
-        return "\(day), \(date.formatted(date: .omitted, time: .shortened))"
+        let calendar = Calendar.current
+        if omitDateIfToday, calendar.isDateInToday(date) {
+            return Self.timeOnlyFormatter.string(from: date)
+        }
+        let thisYear = calendar.isDate(date, equalTo: Date(), toGranularity: .year)
+        return (thisYear ? Self.thisYearFormatter : Self.otherYearFormatter).string(from: date)
     }
 }
 
@@ -511,13 +589,14 @@ struct FolderEditor: Identifiable {
 
 private struct FolderEditorSheet: View {
     let editor: FolderEditor
-    let save: (String, String) -> Void
+    let save: (String, String, String?) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var context = ""
+    @State private var exportDirectoryPath = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             Text(editor.collection == nil ? "New Folder" : "Edit Folder")
                 .font(.headline)
             TextField("Name, e.g. Projects", text: $name)
@@ -526,7 +605,7 @@ private struct FolderEditorSheet: View {
                 Text("Context").font(.subheadline.weight(.semibold))
                 TextEditor(text: $context)
                     .font(.body)
-                    .frame(minHeight: 110)
+                    .frame(minHeight: 96)
                     .scrollContentBackground(.hidden)
                     .padding(6)
                     .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8))
@@ -534,12 +613,34 @@ private struct FolderEditorSheet: View {
                 Text("Who is who, the project, terms and acronyms. Added to the summaries of meetings in this folder and to Copy for AI.")
                     .font(.caption).foregroundStyle(Theme.fg2)
             }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("AI Export Folder (.md)").font(.subheadline.weight(.semibold))
+                HStack(spacing: 8) {
+                    Text(displayExportPath)
+                        .font(.callout)
+                        .foregroundStyle(exportDirectoryPath.isEmpty ? Theme.fg3 : Theme.fg)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 6))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.line))
+                    Button("Choose…", action: chooseExportDirectory)
+                    if !exportDirectoryPath.isEmpty {
+                        Button("Clear") { exportDirectoryPath = "" }
+                    }
+                }
+                Text("Finished meetings in this folder automatically save a Markdown file here (summary, action items, notes, and full transcript) so Claude or other AI agents can read them directly.")
+                    .font(.caption).foregroundStyle(Theme.fg2)
+            }
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button(editor.collection == nil ? "Create" : "Save") {
-                    save(name, context)
+                    let trimmed = exportDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
+                    save(name, context, trimmed.isEmpty ? nil : trimmed)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -548,32 +649,69 @@ private struct FolderEditorSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 440)
+        .frame(width: 480)
         .onAppear {
             name = editor.collection?.name ?? ""
             context = editor.collection?.context ?? ""
+            exportDirectoryPath = editor.collection?.exportDirectoryPath ?? ""
+        }
+    }
+
+    private var displayExportPath: String {
+        guard !exportDirectoryPath.isEmpty else { return "Not set (optional)" }
+        return exportDirectoryPath.replacingOccurrences(of: NSHomeDirectory(), with: "~")
+    }
+
+    private func chooseExportDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Export Here"
+        panel.message = "Choose a local folder where ReMeet will save .md files for meetings in this folder."
+        if !exportDirectoryPath.isEmpty {
+            let url = URL(fileURLWithPath: (exportDirectoryPath as NSString).expandingTildeInPath, isDirectory: true)
+            if FileManager.default.fileExists(atPath: url.path) { panel.directoryURL = url }
+        }
+        if panel.runModal() == .OK, let url = panel.url {
+            exportDirectoryPath = url.path
         }
     }
 }
 
-/// Under the selected folder: its context, or a prompt to add one.
+/// Under the selected folder: its context (and export indicator), or a prompt to add one.
 private struct FolderContextCard: View {
     let folder: MeetingCollection
     let edit: () -> Void
 
     var body: some View {
         Button(action: edit) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(folder.context.isEmpty ? "Add context for this folder…" : folder.context)
-                    .font(.system(size: 11.5))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(folder.context.isEmpty ? "Add context or AI export folder…" : folder.context)
+                    .font(.system(size: 11))
                     .foregroundStyle(Theme.fg2)
-                    .lineLimit(3)
+                    .lineLimit(2)
                     .multilineTextAlignment(.leading)
+                if let path = folder.exportDirectoryPath {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.down.doc")
+                            .font(.system(size: 9.5))
+                        Text(path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
+                            .font(.system(size: 10.5))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    .foregroundStyle(Theme.accent)
+                }
             }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.surface.opacity(0.65), in: RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.line.opacity(0.7)))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help("Edit the name and context of \u{201C}\(folder.name)\u{201D}")
+        .help("Edit \u{201C}\(folder.name)\u{201D} context and AI export folder")
     }
 }

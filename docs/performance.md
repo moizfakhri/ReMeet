@@ -91,3 +91,19 @@ then `--selftest process`:
   `ReMeet --selftest process <folder> [--from stage] [--stop-after stage]` runs the pipeline
   and prints per-stage time and peak footprint.
 - Time Profiler: `xcrun xctrace record --template 'Time Profiler' --launch -- <binary> ...`.
+
+---
+
+## Follow-up pass (2026-11-21 — post-RAG & UI overhaul)
+
+Measured on the same M4 MacBook Pro (16 GB, macOS 27), Release build, 150-meeting synthetic
+dataset (now including both `index.sqlite` FTS5 and `chunks.sqlite` RAG hybrid index):
+
+| What | Measured | Notes |
+|---|---|---|
+| Launch: menu bar ready | **210–248 ms** (median 242.9 ms) | `recoverInterruptedRecordings`, SQLite DB opens/migrations, EventKit, and Core Audio process queries moved off main; redundant `LSRegisterURL` on every boot removed |
+| Launch: 150-meeting library loaded | **20–40 ms** after `launch.end` | Off the main thread |
+| Idle CPU / power / memory | **0.00% CPU / 0.00 power / 30 MB** | `ChunkEmbeddingBackend` now unloads MLX embedders after 30 s idle + on recording start + on quit, with 30 s TTL probe cache |
+| Meeting switch decode → display | **17–20 ms** off-main | Restored async `MeetingDocument.load` + precomputed derived fields (`wordCount`, audio paths, speaker clips/likeness) off-main so SwiftUI `body` does zero `FileManager` or cosine work |
+| Transcript rendering (long calls) | **AppKit `NSTextView`** | Replaced thousands of per-word SwiftUI `Button` views in uncached `FlowLayout` with `NSAttributedString` + `NSLayoutManager` temporary attributes ($O(\log W)$ word lookup, zero relayout at 10 Hz playback) |
+| Chunk index sync | **$O(N)$ SQLite reads** | Fixed $O(N^2)$ full-table scan per meeting inside `ChunkIndex.sync`; stopped reindexing on stage-start ticks |

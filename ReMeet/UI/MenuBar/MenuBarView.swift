@@ -43,15 +43,18 @@ private struct IdlePanel: View {
                 HStack {
                     Label("Start recording", systemImage: "record.circle")
                     Spacer()
-                    Text(KeyboardShortcuts.Name.toggleRecording.hint).font(.system(size: 11.5)).opacity(0.8)
+                    Text(KeyboardShortcuts.Name.toggleRecording.hint).font(.system(size: 11.5)).opacity(0.85)
                 }
+                .font(.system(size: 13.5, weight: .semibold))
+                .foregroundStyle(.white)
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 3)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Theme.accentFill, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
             }
-            .buttonStyle(.glassProminent)
-            .controlSize(.large)
+            .buttonStyle(.plain)
             .disabled(model.recorder.isBusy)
-            .keyboardShortcut("r", modifiers: [.option, .command])
 
             Text(sourceLine)
                 .font(.caption)
@@ -145,10 +148,15 @@ private struct RecordingPanel: View {
                         Text("Note")
                         Text(KeyboardShortcuts.Name.addNote.hint).font(.system(size: 11)).foregroundStyle(Theme.fg3)
                     }
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(Theme.fg)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Theme.line))
                     .fixedSize()
                 }
-                .buttonStyle(.glass)
-                .keyboardShortcut("n", modifiers: [.option, .command])
+                .buttonStyle(.plain)
 
                 Button {
                     recorder.stop()
@@ -156,13 +164,16 @@ private struct RecordingPanel: View {
                     HStack(spacing: 6) {
                         Image(systemName: "stop.fill")
                         Text("Stop")
-                        Text(KeyboardShortcuts.Name.toggleRecording.hint).font(.system(size: 11)).opacity(0.8)
+                        Text(KeyboardShortcuts.Name.toggleRecording.hint).font(.system(size: 11)).opacity(0.85)
                     }
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Theme.recordingFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .fixedSize()
                 }
-                .buttonStyle(.glassProminent)
-                .tint(Theme.recordingFill)
-                .keyboardShortcut("r", modifiers: [.option, .command])
+                .buttonStyle(.plain)
                 .disabled(recorder.state == .stopping)
 
                 Spacer()
@@ -185,11 +196,15 @@ private struct RecordingPanel: View {
                 }
             }
 
-            Button(model.bubble.isVisible ? "Hide recording pill" : "Show recording pill") {
-                if model.bubble.isVisible {
-                    model.bubble.hidePill()
-                } else {
-                    model.bubble.showPill()
+            Button {
+                model.bubble.togglePillVisibility()
+            } label: {
+                HStack(spacing: 6) {
+                    Text(model.bubble.isVisible ? "Hide recording pill" : "Show recording pill")
+                    let hint = KeyboardShortcuts.Name.toggleBubble.hint
+                    if !hint.isEmpty {
+                        Text(hint).foregroundStyle(Theme.fg3)
+                    }
                 }
             }
             .buttonStyle(.borderless)
@@ -401,10 +416,14 @@ struct MeetingStatusText: View {
             .font(.caption)
             .foregroundStyle(Theme.recordingLabel)
         case .failed:
-            Label("Failed", systemImage: "exclamationmark.triangle.fill")
-                .labelStyle(.titleAndIcon)
-                .font(.caption)
-                .foregroundStyle(.orange)
+            HStack(spacing: 4) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Theme.recordingLabel)
+                Text("Failed")
+                    .foregroundStyle(Theme.recordingLabel)
+            }
+            .font(.caption.weight(.medium))
         case .summarized:
             Text(timeText).font(.caption).foregroundStyle(Theme.fg2).monospacedDigit()
         default:

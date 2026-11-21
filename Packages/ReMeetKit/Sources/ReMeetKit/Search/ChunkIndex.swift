@@ -74,12 +74,12 @@ public final class ChunkIndex: @unchecked Sendable {
     public func sync(root: URL, embeddingModel: String? = nil,
                      embed: (@Sendable ([String]) async -> [[Float]]?)? = nil) async throws {
         let folders = MeetingFolder.scan(root: root)
+        let known = try storedMetas()
         var seen = Set<String>()
         for folder in folders {
             seen.insert(folder.id)
-            try await refresh(folder, embeddingModel: embeddingModel, embed: embed)
+            try await refresh(folder, embeddingModel: embeddingModel, embed: embed, cachedMeta: known[folder.id])
         }
-        let known = try storedMetas()
         let gone = Set(known.keys).subtracting(seen)
         if !gone.isEmpty { try delete(ids: gone) }
     }
@@ -98,9 +98,15 @@ public final class ChunkIndex: @unchecked Sendable {
     /// A folder-only change updates `collection_id` without rebuilding chunks or embeddings.
     public func refresh(_ folder: MeetingFolder, embeddingModel: String? = nil,
                         embed: (@Sendable ([String]) async -> [[Float]]?)? = nil) async throws {
+        let stored = try storedMeta(for: folder.id)
+        try await refresh(folder, embeddingModel: embeddingModel, embed: embed, cachedMeta: stored)
+    }
+
+    private func refresh(_ folder: MeetingFolder, embeddingModel: String? = nil,
+                         embed: (@Sendable ([String]) async -> [[Float]]?)? = nil,
+                         cachedMeta stored: StoredMeta?) async throws {
         guard let meta = try? folder.readMeta() else { return }
         let content = Self.contentFingerprint(folder)
-        let stored = try storedMetas()[folder.id]
         let contentChanged = stored?.fingerprint != content
         let embedStale = embeddingModel != nil && stored?.embeddingModel != embeddingModel
         let membershipChanged = stored?.collectionID != meta.collectionID || stored?.title != meta.title
@@ -255,6 +261,18 @@ public final class ChunkIndex: @unchecked Sendable {
             let date = (try? FileManager.default.attributesOfItem(atPath: folder.file(file).path)[.modificationDate]) as? Date
             return date.map { String(Int($0.timeIntervalSince1970 * 1000)) } ?? "-"
         }.joined(separator: ",")
+    }
+
+    private func storedMeta(for id: String) throws -> StoredMeta? {
+        try db.read { db in
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT fingerprint, collection_id, title, embedding_model FROM meeting_chunk_meta WHERE id = ?
+                """, arguments: [id]) else { return nil }
+            let collection: String? = row["collection_id"]
+            let model: String? = row["embedding_model"]
+            return StoredMeta(fingerprint: row["fingerprint"], collectionID: collection,
+                              title: row["title"], embeddingModel: model)
+        }
     }
 
     private func storedMetas() throws -> [String: StoredMeta] {

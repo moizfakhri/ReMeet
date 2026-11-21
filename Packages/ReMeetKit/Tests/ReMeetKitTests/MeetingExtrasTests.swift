@@ -65,13 +65,29 @@ struct MeetingExtrasTests {
     }
 
     @Test func screenShareIgnoresAnOrdinaryZoomWindow() {
-        let meeting = [ShareWindow(owner: "zoom.us", title: "Zoom Meeting")]
-        #expect(ScreenShare.reason(processes: ["zoom.us", "replayd"], windows: meeting) == nil)
-        #expect(ScreenShare.reason(processes: ["CptHost"], windows: meeting) == "Zoom is sharing the screen")
+        let displays = [(width: 1920.0, height: 1080.0)]
+        let meeting = [ShareWindow(owner: "zoom.us", title: "Zoom Meeting", layer: 0, width: 1920, height: 1080)]
+        #expect(ScreenShare.reason(processes: ["zoom.us", "replayd"], windows: meeting, displaySizes: displays) == nil)
+        #expect(ScreenShare.reason(processes: ["CptHost"], windows: meeting, displaySizes: displays) == "Zoom is sharing the screen")
+        #expect(ScreenShare.reason(processes: ["screencapture"], windows: [], displaySizes: displays) != nil)
         let chrome = [ShareWindow(owner: "Google Chrome", title: "meet.google.com is sharing your screen")]
         #expect(ScreenShare.reason(processes: ["Google Chrome"], windows: chrome)?.contains("sharing") == true)
         let teams = [ShareWindow(owner: "Microsoft Teams", title: "You are sharing your screen")]
         #expect(ScreenShare.reason(processes: [], windows: teams) == "Teams is sharing the screen")
+        // Without Screen Recording permission, titles are redacted (""):
+        // normal Teams windows (layer 0) and small floating PIPs do not trigger,
+        // while Teams' elevated full-display sharing border overlay does.
+        let teamsNormal = [
+            ShareWindow(owner: "Microsoft Teams", title: "", layer: 0, width: 1920, height: 1080),
+            ShareWindow(owner: "Microsoft Teams", title: "", layer: 3, width: 320, height: 180),
+        ]
+        #expect(ScreenShare.reason(processes: ["Microsoft Teams"], windows: teamsNormal, displaySizes: displays) == nil)
+        let teamsRedBorder = [
+            ShareWindow(owner: "Microsoft Teams", title: "", layer: 3, width: 1920, height: 1080),
+        ]
+        #expect(ScreenShare.reason(processes: ["Microsoft Teams"], windows: teamsRedBorder, displaySizes: displays) == "Teams is sharing the screen")
+        let cptWindow = [ShareWindow(owner: "CptHost", title: "", layer: 3, width: 400, height: 60)]
+        #expect(ScreenShare.reason(processes: [], windows: cptWindow, displaySizes: displays) == "Zoom is sharing the screen")
     }
 
     @Test func pillHidesForShareAndManualHideWithoutCaptureTricks() {

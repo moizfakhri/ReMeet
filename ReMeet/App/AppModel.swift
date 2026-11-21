@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
 extension KeyboardShortcuts.Name {
     static let toggleRecording = Self("toggleRecording", default: .init(.r, modifiers: [.option, .command]))
     static let addNote = Self("addNote", default: .init(.n, modifiers: [.option, .command]))
+    static let toggleBubble = Self("toggleBubble", default: .init(.h, modifiers: [.option, .command]))
 
     /// The shortcut as the user set it ("⌥⌘R"), or "" if they removed it (audit L1).
     var hint: String { KeyboardShortcuts.getShortcut(for: self)?.description ?? "" }
@@ -19,6 +20,7 @@ extension KeyboardShortcuts.Name {
 enum SettingsKey {
     static let appearance = "appearance"
     static let showBubble = "showNoteBubble"
+    static let autoHideBubbleOnShare = "autoHideBubbleOnShare"
     static let storageFolder = "storageFolder"
     static let keepAudioDays = "keepAudioDays"          // 0 = forever
     static let hasCompletedFirstLaunch = "hasCompletedFirstLaunch"
@@ -56,11 +58,22 @@ final class AppModel {
     /// Search results for the sidebar: meeting id -> snippet, best first; nil when not searching.
     private(set) var searchHits: [(id: String, snippet: String)]?
     @ObservationIgnored private var indexTask: Task<Void, Never>?
-    @ObservationIgnored private(set) lazy var searchIndex: SearchIndex? = try? SearchIndex(
-        url: meetingsRoot.deletingLastPathComponent().appendingPathComponent("index.sqlite"))
-    @ObservationIgnored private(set) lazy var chunkIndex: ChunkIndex? = try? ChunkIndex(
-        url: meetingsRoot.deletingLastPathComponent().appendingPathComponent("chunks.sqlite"))
+    @ObservationIgnored private var _searchIndex: SearchIndex?
+    @ObservationIgnored private var _chunkIndex: ChunkIndex?
     @ObservationIgnored private var chunkIndexTask: Task<Void, Never>?
+    /// Lazily opened when UI needs it synchronously; normal launch opens both off the main thread.
+    var searchIndex: SearchIndex? {
+        if let _searchIndex { return _searchIndex }
+        let opened = try? SearchIndex(url: meetingsRoot.deletingLastPathComponent().appendingPathComponent("index.sqlite"))
+        _searchIndex = opened
+        return opened
+    }
+    var chunkIndex: ChunkIndex? {
+        if let _chunkIndex { return _chunkIndex }
+        let opened = try? ChunkIndex(url: meetingsRoot.deletingLastPathComponent().appendingPathComponent("chunks.sqlite"))
+        _chunkIndex = opened
+        return opened
+    }
     /// Meetings whose summary arrived and that have not been opened yet (menu bar dot).
     private(set) var unseenReady: Set<MeetingFolder> = []
     @ObservationIgnored private(set) lazy var bubble = BubbleController(recorder: recorder)
@@ -95,6 +108,7 @@ final class AppModel {
     private init() {
         UserDefaults.standard.register(defaults: [
             SettingsKey.showBubble: true,
+            SettingsKey.autoHideBubbleOnShare: true,
             SettingsKey.speakerLabels: true,
             SettingsKey.notifyWhenReady: true,
             SettingsKey.askWhenMeetingStarts: true,
@@ -124,21 +138,32 @@ final class AppModel {
             self?.presentDeferredReminderIfRelevant()
         }
         recorder.onStarted = { [weak self] _ in
-            self?.queue.pause()
-            self?.library.reload()
-            self?.bubble.recordingStarted()
+            guard let self else { return }
+            self.queue.pause()
+            let embedder = self.chunkEmbedder
+            Task.detached(priority: .utility) { await embedder.unload() }
+            self.library.reload()
+            self.bubble.recordingStarted()
             if !CommandLine.arguments.contains("--selftest") {
-                self?.bubble.startShareWatch()
+                self.bubble.startShareWatch()
             }
-            self?.callEndStarted()
+            self.callEndStarted()
         }
     }
 
-    func launch() {
-        library.onEdited = { [weak self] folder in self?.reindex(folder) }
+    func launch(openWindowOnLaunch: Bool = false) {
+        library.onEdited = { [weak self] folder in
+            self?.reindex(folder)
+            self?.exportMarkdown(for: folder)
+        }
+        library.onCollectionExportChanged = { [weak self] collection in
+            self?.syncCollectionExports(collection)
+        }
         library.onTrashed = { [weak self] folder in self?.meetingTrashed(folder) }
         queue.onChange = { [weak self] folder in
             self?.library.refresh(folder)
+        }
+        queue.onContentChange = { [weak self] folder in
             self?.reindex(folder)
         }
         models.onReady = { [weak self] id in
@@ -149,6 +174,7 @@ final class AppModel {
         queue.onFinished = { [weak self] folder, meta in
             self?.unseenReady.insert(folder)
             self?.cleanOldAudio()
+            self?.exportMarkdown(for: folder)
             self?.notifier.summaryReady(folder, meta: meta)
         }
         queue.onFailed = { [weak self] folder, failure in self?.notifier.failed(folder, failure: failure) }
@@ -157,8 +183,7 @@ final class AppModel {
         notifier.isRecording = { [weak self] in self?.recorder.isRecording ?? false }
         try? FileManager.default.createDirectory(at: meetingsRoot, withIntermediateDirectories: true)
         Perf.mark("launch.begin")
-        library.recoverInterruptedRecordings(except: nil)
-        library.reload { [weak self] in
+        library.recoverAndReload(except: nil) { [weak self] in
             guard let self else { return }
             Perf.mark("library.loaded")
             self.queue.enqueuePending(in: self.library)
@@ -169,6 +194,9 @@ final class AppModel {
             self?.toggleRecording()
         }
         startMeetingDetection()
+        if openWindowOnLaunch, UserDefaults.standard.bool(forKey: SettingsKey.hasCompletedFirstLaunch) {
+            openMeetings()
+        }
         Perf.mark("launch.end")
         if Perf.recordNow { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.toggleRecording() } }
         if let i = CommandLine.arguments.firstIndex(of: "--perf-stop-after"), i + 1 < CommandLine.arguments.count,
@@ -177,6 +205,9 @@ final class AppModel {
         }
         KeyboardShortcuts.onKeyUp(for: .addNote) { [weak self] in
             self?.addNoteShortcut()
+        }
+        KeyboardShortcuts.onKeyUp(for: .toggleBubble) { [weak self] in
+            self?.toggleBubbleShortcut()
         }
         (AppearanceSetting(rawValue: UserDefaults.standard.string(forKey: SettingsKey.appearance) ?? "") ?? .system).apply()
         models.removeRetiredModels()
@@ -224,16 +255,27 @@ final class AppModel {
         DockPresence.makeRegularNow()
         guard let openWindowAction else {
             openMeetingsWhenReady = true
-            NSApp.activate()
+            NSRunningApplication.current.activate(options: [.activateAllWindows])
+            NSApp.activate(ignoringOtherApps: true)
             return
         }
         openMeetingsWhenReady = false
         openWindowAction(id: WindowID.meetings)
+        bringMeetingsWindowToFront()
+        // On first open, SwiftUI creates the NSWindow on the next run-loop turn after
+        // openWindowAction; raise it again once created so it never lands behind another app.
+        DispatchQueue.main.async { [weak self] in
+            self?.bringMeetingsWindowToFront()
+        }
+    }
+
+    private func bringMeetingsWindowToFront() {
+        NSRunningApplication.current.activate(options: [.activateAllWindows])
+        NSApp.activate(ignoringOtherApps: true)
         if let window = Self.meetingsWindow() {
             if window.isMiniaturized { window.deminiaturize(nil) }
             window.makeKeyAndOrderFront(nil)
         }
-        NSApp.activate()
     }
 
     /// The meetings window, when SwiftUI has created it. Other panels (the recording bar,
@@ -311,6 +353,7 @@ final class AppModel {
     func drainInferenceForTermination() async {
         await queue.prepareToTerminate()
         await builtInSummarizer.waitUntilIdle()
+        await chunkEmbedder.unload()
     }
 
     /// Summarize stage bound to Settings (also used by self-tests).
@@ -338,9 +381,70 @@ final class AppModel {
         }
     }
 
-    /// Notes edited in the meeting window: keep search in step (MeetingDocument updates Markdown).
+    /// Notes edited in the meeting window: keep search and exports in step (MeetingDocument updates Markdown).
     func notesEdited(_ document: MeetingDocument) {
         reindex(document.folder)
+        exportMarkdown(for: document.folder)
+    }
+
+    /// Action item toggled or speaker edited in the meeting window: sync AI export if configured.
+    func documentEdited(_ document: MeetingDocument, reindexSearch: Bool = false) {
+        if reindexSearch { reindex(document.folder) }
+        exportMarkdown(for: document.folder)
+    }
+
+    /// Auto-exports a meeting to its ReMeet folder's configured local directory (if any), off main.
+    func exportMarkdown(for folder: MeetingFolder) {
+        let collections = library.collections
+        Task.detached(priority: .utility) {
+            guard let meta = try? folder.readMeta() else { return }
+            let collection = meta.collectionID.flatMap { id in collections.first { $0.id == id } }
+            _ = try? MeetingExporter.sync(folder, collection: collection)
+        }
+    }
+
+    /// Exports (or cleans up) all meetings belonging to `collection` in the background.
+    func syncCollectionExports(_ collection: MeetingCollection, completion: (@MainActor @Sendable (Int) -> Void)? = nil) {
+        let folders = library.items
+            .filter { $0.meta.collectionID == collection.id && $0.meta.status != .recording }
+            .map(\.folder)
+        Task.detached(priority: .utility) {
+            var count = 0
+            for folder in folders {
+                if let _ = try? MeetingExporter.sync(folder, collection: collection) {
+                    count += 1
+                }
+            }
+            let exportedCount = count
+            if let completion {
+                await MainActor.run { completion(exportedCount) }
+            }
+        }
+    }
+
+    /// Prompts for a save destination and writes an AI-context `.md` file for any meeting.
+    func exportMarkdownOneOff(_ folder: MeetingFolder) {
+        let meta = library.item(for: folder)?.meta ?? (try? folder.readMeta())
+        let suggested = meta.map { MeetingExporter.filename(meta: $0) } ?? "\(folder.name).md"
+        let collection = meta?.collectionID.flatMap { library.collection($0) }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        panel.nameFieldStringValue = suggested
+        panel.canCreateDirectories = true
+        panel.message = "Save this meeting (summary, action items, notes, and full transcript) as Markdown."
+        if let dirPath = collection?.exportDirectoryPath {
+            let dirURL = URL(fileURLWithPath: (dirPath as NSString).expandingTildeInPath, isDirectory: true)
+            if FileManager.default.fileExists(atPath: dirURL.path) {
+                panel.directoryURL = dirURL
+            }
+        }
+        panel.begin { response in
+            guard response == .OK, let destination = panel.url else { return }
+            Task.detached(priority: .userInitiated) {
+                _ = try? MeetingExporter.exportOneOff(folder, to: destination, collection: collection)
+            }
+        }
     }
 
     private func meetingTrashed(_ folder: MeetingFolder) {
@@ -512,8 +616,8 @@ final class AppModel {
             guard let self else { return }
             self.queue.enqueuePending(in: self.library)
         }
-        searchIndex = try? SearchIndex(url: meetingsRoot.deletingLastPathComponent().appendingPathComponent("index.sqlite"))
-        chunkIndex = try? ChunkIndex(url: meetingsRoot.deletingLastPathComponent().appendingPathComponent("chunks.sqlite"))
+        _searchIndex = nil
+        _chunkIndex = nil
         syncSearchIndex()
     }
 
@@ -758,58 +862,94 @@ final class AppModel {
     }
 
     /// Re-checks the whole index against the folders (launch, storage folder change).
+    /// Opens SQLite databases off the main thread so launch never blocks on disk I/O or migrations.
     func syncSearchIndex() {
-        guard let index = searchIndex else { return }
         let root = meetingsRoot
+        let existingSearch = _searchIndex
+        let indexURL = root.deletingLastPathComponent().appendingPathComponent("index.sqlite")
         indexTask?.cancel()
-        indexTask = Task.detached(priority: .utility) { try? index.sync(root: root) }
+        indexTask = Task.detached(priority: .utility) { [weak self] in
+            let index = existingSearch ?? (try? SearchIndex(url: indexURL))
+            guard let index else { return }
+            await MainActor.run { [weak self] in
+                if self?._searchIndex == nil { self?._searchIndex = index }
+            }
+            try? index.sync(root: root)
+        }
         syncChunkIndex()
     }
 
     /// One meeting changed (pipeline step, rename, notes): update just that entry.
     func reindex(_ folder: MeetingFolder) {
-        if let index = searchIndex {
-            Task.detached(priority: .utility) { try? index.index(folder) }
+        let existingSearch = _searchIndex
+        let indexURL = meetingsRoot.deletingLastPathComponent().appendingPathComponent("index.sqlite")
+        Task.detached(priority: .utility) { [weak self] in
+            let index = existingSearch ?? (try? SearchIndex(url: indexURL))
+            guard let index else { return }
+            await MainActor.run { [weak self] in
+                if self?._searchIndex == nil { self?._searchIndex = index }
+            }
+            try? index.index(folder)
         }
         reindexChunks(folder)
     }
 
     func removeFromSearchIndex(_ folder: MeetingFolder) {
         searchHits?.removeAll { $0.id == folder.id }
-        guard let index = searchIndex else { return }
+        let existingSearch = _searchIndex
+        let indexURL = meetingsRoot.deletingLastPathComponent().appendingPathComponent("index.sqlite")
         let id = folder.id
-        Task.detached(priority: .utility) { try? index.remove(id: id) }
+        Task.detached(priority: .utility) {
+            let index = existingSearch ?? (try? SearchIndex(url: indexURL))
+            try? index?.remove(id: id)
+        }
         removeFromChunkIndex(folder)
     }
 
     func syncChunkIndex() {
-        guard let index = chunkIndex else { return }
         let root = meetingsRoot
+        let existingChunk = _chunkIndex
+        let chunkURL = root.deletingLastPathComponent().appendingPathComponent("chunks.sqlite")
         let modelsRoot = models.root
         let server = lmStudioServerURL
         let embedder = chunkEmbedder
         chunkIndexTask?.cancel()
-        chunkIndexTask = Task.detached(priority: .utility) {
+        chunkIndexTask = Task.detached(priority: .utility) { [weak self] in
+            let index = existingChunk ?? (try? ChunkIndex(url: chunkURL))
+            guard let index else { return }
+            await MainActor.run { [weak self] in
+                if self?._chunkIndex == nil { self?._chunkIndex = index }
+            }
             let session = await embedder.session(modelsRoot: modelsRoot, server: server)
             try? await index.sync(root: root, embeddingModel: session?.modelID, embed: session?.embed)
         }
     }
 
     func reindexChunks(_ folder: MeetingFolder) {
-        guard let index = chunkIndex else { return }
+        let existingChunk = _chunkIndex
+        let chunkURL = meetingsRoot.deletingLastPathComponent().appendingPathComponent("chunks.sqlite")
         let modelsRoot = models.root
         let server = lmStudioServerURL
         let embedder = chunkEmbedder
-        Task.detached(priority: .utility) {
+        Task.detached(priority: .utility) { [weak self] in
+            let index = existingChunk ?? (try? ChunkIndex(url: chunkURL))
+            guard let index else { return }
+            await MainActor.run { [weak self] in
+                if self?._chunkIndex == nil { self?._chunkIndex = index }
+            }
             let session = await embedder.session(modelsRoot: modelsRoot, server: server)
             try? await index.refresh(folder, embeddingModel: session?.modelID, embed: session?.embed)
         }
     }
 
     func removeFromChunkIndex(_ folder: MeetingFolder) {
-        guard let index = chunkIndex else { return }
+        let existingChunk = _chunkIndex
+        let chunkURL = meetingsRoot.deletingLastPathComponent().appendingPathComponent("chunks.sqlite")
         let id = folder.id
-        Task.detached(priority: .utility) { try? index.remove(id: id) }
+        Task.detached(priority: .utility) {
+            let index = existingChunk ?? (try? ChunkIndex(url: chunkURL))
+            try? index?.remove(id: id)
+        }
     }
 
     /// Chat source pill: open the meeting, scroll the transcript, and queue playback seek.
@@ -887,6 +1027,7 @@ final class AppModel {
             await document.reload()
             library.refresh(document.folder)
             reindex(document.folder)
+            exportMarkdown(for: document.folder)
             if wrote { refreshSummary(document.folder) }
             return WordingResult(message: nil, wrote: wrote)
         } catch {
@@ -935,6 +1076,11 @@ final class AppModel {
         bubble.openNoteField()
     }
 
+    func toggleBubbleShortcut() {
+        guard recorder.isRecording else { return }
+        bubble.togglePillVisibility()
+    }
+
     func recordingFinished(_ folder: MeetingFolder) {
         queue.resume()
         queue.enqueue(folder)
@@ -948,7 +1094,6 @@ final class AppModel {
 @MainActor
 enum DockPresence {
     private static var reasons: Set<String> = []
-    private static var didRegisterBundle = false
 
     /// The grille, from the bundled icns. Notification Center reads that file
     /// (an LSUIElement app's asset-catalog icon is what shows up as the blank tile);
@@ -961,12 +1106,11 @@ enum DockPresence {
         return NSImage(named: "AppIcon") ?? NSImage(named: NSImage.applicationIconName)
     }
 
-    /// Point the Dock and Launch Services at the real icon before any banner is posted.
+    /// Point the Dock at the real icon before any window opens or banner is posted.
+    /// Launch Services registration is handled once at install time (`scripts/install.sh`)
+    /// rather than blocking every app launch on the main thread.
     static func installIcon() {
         applyAppIcon()
-        guard !didRegisterBundle else { return }
-        didRegisterBundle = true
-        _ = LSRegisterURL(Bundle.main.bundleURL as CFURL, true)
     }
 
     /// The Dock click has to show a window now. `show` still waits a turn when a layout pass is open.

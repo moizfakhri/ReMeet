@@ -38,13 +38,20 @@ struct SettingsRoot: View {
         NavigationSplitView {
             List(Pane.allCases) { item in
                 let isSelected = pane == item
-                Label(item.rawValue, systemImage: item.symbol)
-                    .foregroundStyle(isSelected ? Theme.accent : Theme.fg)
-                    .sidebarRow(selected: isSelected) {
-                        var transaction = Transaction()
-                        transaction.disablesAnimations = true
-                        withTransaction(transaction) { pane = item }
-                    }
+                HStack(spacing: 8) {
+                    Image(systemName: item.symbol)
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundStyle(isSelected ? Theme.accent : Theme.fg2)
+                        .frame(width: 18)
+                    Text(item.rawValue)
+                        .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
+                        .foregroundStyle(isSelected ? Theme.accent : Theme.fg)
+                }
+                .sidebarRow(selected: isSelected) {
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) { pane = item }
+                }
             }
             .navigationSplitViewColumnWidth(190)
         } detail: {
@@ -75,6 +82,7 @@ private struct GeneralPane: View {
     @Environment(AppModel.self) private var model
     @AppStorage(SettingsKey.appearance) private var appearance = AppearanceSetting.system.rawValue
     @AppStorage(SettingsKey.showBubble) private var showBubble = true
+    @AppStorage(SettingsKey.autoHideBubbleOnShare) private var autoHideBubbleOnShare = true
     @AppStorage(SettingsKey.keepAudioDays) private var keepAudioDays = 0
     @AppStorage(SettingsKey.storageFolder) private var storageFolder = ""
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
@@ -92,9 +100,16 @@ private struct GeneralPane: View {
             Section("Shortcuts") {
                 KeyboardShortcuts.Recorder("Start or stop recording", name: .toggleRecording)
                 KeyboardShortcuts.Recorder("Add a note", name: .addNote)
+                KeyboardShortcuts.Recorder("Hide or show recording pill", name: .toggleBubble)
             }
             Section("Note bubble") {
                 Toggle("Show the recording pill while recording", isOn: $showBubble.onSet { _ in model.bubbleSettingChanged() })
+                Text("When off, the pill never appears on screen—ideal if you share your screen often. You still see the red timer in the menu bar, and \(KeyboardShortcuts.Name.addNote.hint.isEmpty ? "Add a note" : KeyboardShortcuts.Name.addNote.hint) opens a note box only while you type.")
+                    .font(.caption).foregroundStyle(Theme.fg2)
+                Toggle("Auto-hide pill when screen sharing is detected", isOn: $autoHideBubbleOnShare)
+                    .disabled(!showBubble)
+                Text("Hides the pill automatically when Zoom, Teams, or macOS screen sharing/recording starts. Press \(KeyboardShortcuts.Name.toggleBubble.hint.isEmpty ? "the shortcut above" : KeyboardShortcuts.Name.toggleBubble.hint) anytime to hide or bring it back.")
+                    .font(.caption).foregroundStyle(Theme.fg2)
             }
             Section("Storage") {
                 LabeledContent("Meetings folder") {

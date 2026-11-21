@@ -93,7 +93,7 @@ private struct Pill: View {
                     .frame(width: 22, height: 22)
             }
             .buttonStyle(.plain)
-            .help("Hide the pill. It comes back from the menu bar.")
+            .help("Hide the pill (\(KeyboardShortcuts.Name.toggleBubble.hint)). Bring it back with the same shortcut or from the menu bar.")
             .accessibilityLabel("Hide recording pill")
             Button(action: controller.stopRecording) {
                 RoundedRectangle(cornerRadius: 2.5)

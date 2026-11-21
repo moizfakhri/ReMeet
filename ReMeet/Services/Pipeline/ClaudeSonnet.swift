@@ -192,6 +192,7 @@ enum ClaudeSonnet {
             try await withCheckedThrowingContinuation { continuation in
                 let resumed = ResumeOnce()
                 process.terminationHandler = { process in
+                    resumed.cancelTimeout()
                     let cancelled = claudeJobs.take(job)
                     try? outHandle.close()
                     try? errHandle.close()
@@ -216,6 +217,7 @@ enum ClaudeSonnet {
                 do {
                     try process.run()
                 } catch {
+                    resumed.cancelTimeout()
                     _ = claudeJobs.take(job)
                     resumed.resume(continuation, throwing: HaikuBridgeError.unreachable)
                     return
@@ -225,10 +227,11 @@ enum ClaudeSonnet {
                     input.fileHandleForWriting.write(body)
                     try? input.fileHandleForWriting.close()
                 }
-                Task {
+                resumed.setTimeout(Task {
                     try? await Task.sleep(for: .seconds(240))
+                    guard !Task.isCancelled else { return }
                     if process.isRunning { process.terminate() }
-                }
+                })
             }
         } onCancel: {
             claudeJobs.cancel(job)
@@ -240,12 +243,35 @@ enum ClaudeSonnet {
 private final class ResumeOnce: @unchecked Sendable {
     private let lock = NSLock()
     private var done = false
+    private var timeout: Task<Void, Never>?
+
+    func setTimeout(_ task: Task<Void, Never>) {
+        lock.lock()
+        if done {
+            lock.unlock()
+            task.cancel()
+            return
+        }
+        timeout = task
+        lock.unlock()
+    }
+
+    func cancelTimeout() {
+        lock.lock()
+        let task = timeout
+        timeout = nil
+        lock.unlock()
+        task?.cancel()
+    }
 
     func resume(_ continuation: CheckedContinuation<String, Error>, returning value: String) {
         lock.lock()
         let first = !done
         done = true
+        let task = timeout
+        timeout = nil
         lock.unlock()
+        task?.cancel()
         if first { continuation.resume(returning: value) }
     }
 
@@ -253,7 +279,10 @@ private final class ResumeOnce: @unchecked Sendable {
         lock.lock()
         let first = !done
         done = true
+        let task = timeout
+        timeout = nil
         lock.unlock()
+        task?.cancel()
         if first { continuation.resume(throwing: error) }
     }
 }

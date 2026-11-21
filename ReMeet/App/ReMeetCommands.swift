@@ -53,6 +53,9 @@ struct ReMeetCommands: Commands {
             Button("Copy for AI") { if let document { AIClipboard.copy(document) } }
                 .keyboardShortcut("c", modifiers: [.shift, .command])
                 .disabled(document == nil)
+            Button("Export Markdown…") { if let document { model.exportMarkdownOneOff(document.folder) } }
+                .keyboardShortcut("e", modifiers: [.shift, .command])
+                .disabled(document == nil)
             Button("Copy Summary") { if let document { SummaryClipboard.copy(document) } }
                 .keyboardShortcut("c", modifiers: [.option, .shift, .command])
                 .disabled(document?.summary == nil)
@@ -78,12 +81,17 @@ struct ReMeetCommands: Commands {
                 if let document { NSWorkspace.shared.activateFileViewerSelecting([document.folder.url]) }
             }
             .disabled(document == nil)
+            if let exported = document?.meta.exportedMarkdownPath, !exported.isEmpty {
+                Button("Reveal Exported .md") {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: exported)])
+                }
+            }
             Button("Reveal Original Audio") {
-                if let urls = document?.folder.originalAudioURLs(), !urls.isEmpty {
+                if let urls = document?.originalAudioURLs, !urls.isEmpty {
                     NSWorkspace.shared.activateFileViewerSelecting(urls)
                 }
             }
-            .disabled(document?.folder.originalAudioURLs().isEmpty != false)
+            .disabled(document?.originalAudioURLs.isEmpty != false)
             Button("Reprocess") { if let document { model.reprocess(document.folder) } }
                 .disabled(document == nil || document?.meta.status == .recording)
             Divider()

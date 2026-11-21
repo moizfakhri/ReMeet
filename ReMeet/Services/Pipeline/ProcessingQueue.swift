@@ -88,7 +88,11 @@ final class ProcessingQueue {
     /// Stages that can run. A stage without a runner stops processing for now (later phases
     /// add them); a meeting then waits at that status.
     @ObservationIgnored var runners: [PipelineStage: StageRunner] = [.compress: CompressRunner()]
+    /// Called on any UI-visible pipeline state change (stage start, completion, failure, rewind).
     @ObservationIgnored var onChange: ((MeetingFolder) -> Void)?
+    /// Called only when on-disk content changed (transcript/summary written, rewind, or settled stop)
+    /// so search and chunk indexes don't re-read files when a stage merely starts.
+    @ObservationIgnored var onContentChange: ((MeetingFolder) -> Void)?
     @ObservationIgnored var onFinished: ((MeetingFolder, MeetingMeta) -> Void)?
     /// The transcript is written (the summary may still be running).
     @ObservationIgnored var onTranscribed: ((MeetingFolder, MeetingMeta) -> Void)?
@@ -378,6 +382,7 @@ final class ProcessingQueue {
                 if rewindAfterCurrent?.folder == folder { return }
                 let updated = try folder.updateMeta { $0.markCompleted(stage, seconds: Date().timeIntervalSince(started)) }
                 onChange?(folder)
+                if stage == .transcribe || stage == .summarize { onContentChange?(folder) }
                 if stage == .transcribe { onTranscribed?(folder, updated) }
                 if updated.status == .summarized { onFinished?(folder, updated) }
             } catch is CancellationError {

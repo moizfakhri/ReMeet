@@ -20,6 +20,8 @@ struct MeetingWindowRoot: View {
     /// Last few meetings, so clicking back and forth does not blank the detail.
     @State private var cache: [String: MeetingDocument] = [:]
     @State private var cacheOrder: [String] = []
+    @State private var loadTask: Task<Void, Never>?
+    @State private var loadingFolder: MeetingFolder?
 
     var body: some View {
         // Transcript is a fixed-width trailing panel, not `.inspector`. Nested
@@ -55,7 +57,9 @@ struct MeetingWindowRoot: View {
         .onAppear {
             Perf.mark("window.appear")
             DockPresence.show("meetings")
-            model.library.reload()
+            if !model.library.hasLoaded {
+                model.library.reload()
+            }
             DispatchQueue.main.async { Perf.mark("window.firstRunloopAfterAppear") }
             applyRequestedSelection()
             if selection == nil, model.recorder.isRecording { selection = .live }
@@ -63,6 +67,8 @@ struct MeetingWindowRoot: View {
             if case .meeting(let folder) = selection { adopt(folder) }
         }
         .onDisappear {
+            loadTask?.cancel()
+            loadTask = nil
             player.pause()
             DockPresence.hide("meetings")
         }
@@ -116,11 +122,10 @@ struct MeetingWindowRoot: View {
                                message: "Its meta.json is missing or unreadable.")
             } else if let document, document.folder == folder {
                 MeetingDetailView(document: document, player: player, showTranscript: $showTranscript)
-                    .id(folder)
             } else {
-                // Same min frame as a document, so a miss does not collapse the column.
-                Theme.surface
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Lightweight placeholder while off-main JSON decode finishes (~5-15 ms),
+                // showing the title already in RAM so switching never flashes blank or hitches main.
+                LoadingMeetingPlaceholder(item: model.library.item(for: folder))
             }
         case nil:
             if model.library.items.isEmpty {
@@ -137,6 +142,14 @@ struct MeetingWindowRoot: View {
             CopyForAIButton(document: document)
 
             Button {
+                if let document { model.exportMarkdownOneOff(document.folder) }
+            } label: {
+                Label("Export Markdown", systemImage: "arrow.down.doc")
+            }
+            .help("Save this meeting as an AI-ready Markdown file (⇧⌘E)")
+            .disabled(document == nil)
+
+            Button {
                 if let document { SummaryClipboard.copy(document) }
             } label: {
                 Label("Copy summary", systemImage: "doc.on.doc")
@@ -147,14 +160,14 @@ struct MeetingWindowRoot: View {
             RegenerateMenu(document: document)
 
             Button {
-                if let urls = document?.folder.originalAudioURLs(), !urls.isEmpty {
+                if let urls = document?.originalAudioURLs, !urls.isEmpty {
                     NSWorkspace.shared.activateFileViewerSelecting(urls)
                 }
             } label: {
                 Label("Reveal audio", systemImage: "waveform")
             }
             .help("Show the original recording in Finder")
-            .disabled(document?.folder.originalAudioURLs().isEmpty != false)
+            .disabled(document?.originalAudioURLs.isEmpty != false)
 
             Button {
                 model.chatFocusPending = true
@@ -203,13 +216,15 @@ struct MeetingWindowRoot: View {
         }
     }
 
-    /// Puts `folder` on screen before the next paint. Meeting JSON is small, so the
-    /// read stays on this turn instead of hopping to a detached task (that hop was
-    /// the flash of the previous meeting and the split-view jump).
+    /// Puts `folder` on screen without blocking the main thread on large JSON files.
+    /// Cached meetings switch instantaneously; cache misses decode off-main and land in place.
     private func adopt(_ folder: MeetingFolder) {
         model.markSeen(folder)
         let currentMeta = model.library.item(for: folder)?.meta
         guard document?.folder != folder else {
+            loadTask?.cancel()
+            loadTask = nil
+            loadingFolder = nil
             if player.folder != folder {
                 player.load(folder, knownDuration: document?.meta.effectiveDuration ?? 0)
             }
@@ -221,27 +236,47 @@ struct MeetingWindowRoot: View {
             }
             return
         }
-        let cached: MeetingDocument?
         if let hit = cache[folder.id], currentMeta == nil || hit.meta == currentMeta {
-            cached = hit
-        } else {
-            cached = nil
-        }
-        let loaded = cached ?? MeetingDocument(folder: folder)
-        guard let loaded else {
-            loadFailed = folder
+            loadTask?.cancel()
+            loadTask = nil
+            loadingFolder = nil
+            installLoadedDocument(hit)
             return
         }
+        // Cache miss: decode JSON & derived metrics off the main thread so 400 KB transcripts
+        // and 100 KB diarization files never hitch sidebar clicks or window opening.
+        guard loadingFolder != folder else { return }
+        loadTask?.cancel()
+        loadingFolder = folder
         loadFailed = nil
-        document = loaded
+        player.load(folder, knownDuration: currentMeta?.effectiveDuration ?? 0)
+        loadTask = Task {
+            let loaded = await MeetingDocument.load(folder)
+            guard !Task.isCancelled, loadingFolder == folder else { return }
+            loadingFolder = nil
+            guard let loaded else {
+                loadFailed = folder
+                return
+            }
+            installLoadedDocument(loaded)
+        }
+    }
+
+    private func installLoadedDocument(_ loaded: MeetingDocument) {
+        loadFailed = nil
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            document = loaded
+        }
         let id = loaded.folder.id
         cache[id] = loaded
         cacheOrder.removeAll { $0 == id }
         cacheOrder.append(id)
-        while cacheOrder.count > 8 {
+        while cacheOrder.count > 12 {
             cache.removeValue(forKey: cacheOrder.removeFirst())
         }
-        player.load(folder, knownDuration: loaded.meta.effectiveDuration)
+        player.load(loaded.folder, knownDuration: loaded.meta.effectiveDuration)
         if let cite = model.consumePendingCitationPlay() {
             player.play(from: max(0, cite - 1))
         }
@@ -264,6 +299,38 @@ struct MeetingWindowRoot: View {
                 player.reloadAudio()
             }
         }
+    }
+}
+
+/// Instant placeholder using already-in-RAM metadata while the meeting's JSON files decode off-main.
+private struct LoadingMeetingPlaceholder: View {
+    let item: MeetingItem?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let item {
+                Text(item.meta.title)
+                    .font(Fonts.title)
+                    .foregroundStyle(Theme.fg)
+                HStack(spacing: 6) {
+                    Text(item.meta.startTime.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)))
+                    Text("·")
+                    Text(item.meta.startTime.formatted(date: .omitted, time: .shortened))
+                    if item.meta.effectiveDuration > 0 {
+                        Text("·")
+                        Text(TimeFormat.duration(item.meta.effectiveDuration))
+                    }
+                }
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.fg2)
+            }
+            Spacer()
+        }
+        .frame(maxWidth: 620, alignment: .leading)
+        .padding(.horizontal, 40)
+        .padding(.top, 28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Theme.surface)
     }
 }
 

@@ -1,79 +1,114 @@
 import ReMeetKit
 import SwiftUI
 
-/// Floating glass player: play/pause, ±15 s, scrubber with note ticks, speed.
+/// Floating audio player capsule: play/pause, ±15 s, scrubber with note ticks, speed.
+/// When audio is no longer on disk, displays a clean compact status pill instead of
+/// overlapping text on top of disabled playback controls.
 struct PlayerCapsule: View {
     let player: PlayerModel
     let notes: [MeetingNote]
     @State private var scrubbing: Double?
 
+    private var audioUnavailable: Bool {
+        !player.isAvailable && player.folder.map { !Self.hasAudio($0) } == true
+    }
+
     var body: some View {
-        HStack(spacing: 12) {
-            Button { player.skip(-15) } label: { Image(systemName: "gobackward.15") }
-                .help("Back 15 seconds")
-                .accessibilityLabel("Back 15 seconds")
-            Button { player.togglePlay() } label: {
-                Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 15))
-                    .frame(width: 22)
-            }
-            .help(player.isPlaying ? "Pause" : "Play")
-            .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
-            Button { player.skip(15) } label: { Image(systemName: "goforward.15") }
-                .help("Forward 15 seconds")
-                .accessibilityLabel("Forward 15 seconds")
-
-            Text(TimeFormat.clock(scrubbing ?? player.currentTime))
-                .font(Fonts.monoSmall)
-                .foregroundStyle(Theme.fg2)
-                .frame(minWidth: 44, alignment: .trailing)
-
-            Scrubber(value: scrubbing ?? player.currentTime, duration: player.duration, ticks: notes.map(\.t)) { value, ended in
-                if ended {
-                    player.seek(to: value)
-                    scrubbing = nil
-                } else {
-                    scrubbing = value
+        Group {
+            if audioUnavailable {
+                HStack(spacing: 8) {
+                    Image(systemName: "waveform.slash")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.fg3)
+                    Text("No audio on disk")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(Theme.fg2)
+                    Text("·")
+                        .foregroundStyle(Theme.fg3)
+                    Text("Removed by Keep audio, or never recorded")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.fg3)
+                        .lineLimit(1)
                 }
-            }
-            .frame(height: 22)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 9)
+            } else {
+                HStack(spacing: 12) {
+                    Button { player.skip(-15) } label: {
+                        Image(systemName: "gobackward.15")
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .help("Back 15 seconds")
+                    .accessibilityLabel("Back 15 seconds")
 
-            Text(TimeFormat.clock(player.duration))
-                .font(Fonts.monoSmall)
-                .foregroundStyle(Theme.fg2)
-                .frame(minWidth: 44, alignment: .leading)
+                    Button { player.togglePlay() } label: {
+                        Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 28, height: 28)
+                            .background(Theme.accentFill, in: Circle())
+                    }
+                    .help(player.isPlaying ? "Pause" : "Play")
+                    .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
 
-            Button {
-                let speeds = PlayerModel.speeds
-                let index = speeds.firstIndex(of: player.speed) ?? 0
-                player.speed = speeds[(index + 1) % speeds.count]
-            } label: {
-                Text(speedLabel)
-                    .font(.system(size: 12, weight: .semibold).monospacedDigit())
-                    .frame(width: 36)
+                    Button { player.skip(15) } label: {
+                        Image(systemName: "goforward.15")
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .help("Forward 15 seconds")
+                    .accessibilityLabel("Forward 15 seconds")
+
+                    Text(TimeFormat.clock(scrubbing ?? player.currentTime))
+                        .font(Fonts.monoSmall)
+                        .foregroundStyle(Theme.fg2)
+                        .frame(minWidth: 42, alignment: .trailing)
+
+                    Scrubber(value: scrubbing ?? player.currentTime, duration: player.duration, ticks: notes.map(\.t)) { value, ended in
+                        if ended {
+                            player.seek(to: value)
+                            scrubbing = nil
+                        } else {
+                            scrubbing = value
+                        }
+                    }
+                    .frame(height: 22)
+
+                    Text(TimeFormat.clock(player.duration))
+                        .font(Fonts.monoSmall)
+                        .foregroundStyle(Theme.fg2)
+                        .frame(minWidth: 42, alignment: .leading)
+
+                    Button {
+                        let speeds = PlayerModel.speeds
+                        let index = speeds.firstIndex(of: player.speed) ?? 0
+                        player.speed = speeds[(index + 1) % speeds.count]
+                    } label: {
+                        Text(speedLabel)
+                            .font(.system(size: 11.5, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(Theme.fg2)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(Theme.mark, in: Capsule())
+                    }
+                    .help("Playback speed")
+                    .accessibilityLabel("Playback speed \(speedLabel)")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.fg)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .frame(maxWidth: 600)
+                .disabled(!player.isAvailable)
+                .opacity(player.audioMissing ? 0.6 : 1)
+                .animation(nil, value: player.audioMissing)
             }
-            .help("Playback speed")
-            .accessibilityLabel("Playback speed \(speedLabel)")
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(Theme.fg)
-        .padding(.horizontal, 18)
-        .padding(.vertical, 10)
-        .frame(maxWidth: 620)
+        .background(Theme.bg.opacity(0.94), in: Capsule())
         .glassEffect(.regular, in: Capsule())
-        .disabled(!player.isAvailable)
-        .opacity(player.audioMissing ? 0.6 : 1)
-        .animation(nil, value: player.audioMissing)
-        .overlay {
-            if !player.isAvailable, player.folder.map({ !Self.hasAudio($0) }) == true {
-                Text("No audio for this meeting (removed by Keep audio, or never recorded).")
-                    .font(.caption)
-                    .foregroundStyle(Theme.fg2)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(Theme.surface, in: Capsule())
-            }
-        }
+        .overlay(Capsule().stroke(Theme.line, lineWidth: 1))
+        .shadow(color: .black.opacity(0.18), radius: 14, y: 5)
     }
 
     private static func hasAudio(_ folder: MeetingFolder) -> Bool {

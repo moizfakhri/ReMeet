@@ -35,8 +35,12 @@ final class PlayerModel {
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 10), queue: .main) { [weak self] time in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                self.currentTime = time.seconds.isFinite ? time.seconds : 0
-                self.isPlaying = self.player.rate != 0
+                let playing = self.player.rate != 0
+                if self.isPlaying != playing { self.isPlaying = playing }
+                let next = time.seconds.isFinite ? time.seconds : 0
+                if playing || abs(next - self.currentTime) > 0.01 {
+                    self.currentTime = next
+                }
             }
         }
     }

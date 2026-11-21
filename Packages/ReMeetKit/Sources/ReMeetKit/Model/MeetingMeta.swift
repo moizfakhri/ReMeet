@@ -122,6 +122,9 @@ public struct MeetingMeta: Codable, Equatable, Sendable {
     public var sourceApp: String?
     /// The user folder this meeting is in (`MeetingCollection.id`), nil = none.
     public var collectionID: String?
+    /// Last auto-exported AI Markdown file path, so renames and folder moves update in place
+    /// instead of leaving stale duplicates behind.
+    public var exportedMarkdownPath: String?
     /// Voices to find on the call audio, not counting you. Nil lets the diarizer decide.
     public var expectedCallSpeakers: Int?
     public var startHostTime: UInt64?
@@ -143,7 +146,7 @@ public struct MeetingMeta: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, app, title, titleIsUserSet, status, failure, startTime, endTime, durationSeconds
-        case sourceApp, collectionID, expectedCallSpeakers, startHostTime, clock, devices, mic, system, events, processing
+        case sourceApp, collectionID, exportedMarkdownPath, expectedCallSpeakers, startHostTime, clock, devices, mic, system, events, processing
     }
 
     public init(from decoder: Decoder) throws {
@@ -161,6 +164,7 @@ public struct MeetingMeta: Codable, Equatable, Sendable {
             ?? (endTime != nil ? .recorded : .recording)
         sourceApp = try c.decodeIfPresent(String.self, forKey: .sourceApp)
         collectionID = try c.decodeIfPresent(String.self, forKey: .collectionID)
+        exportedMarkdownPath = try c.decodeIfPresent(String.self, forKey: .exportedMarkdownPath)
         let speakers = try c.decodeIfPresent(Int.self, forKey: .expectedCallSpeakers)
         expectedCallSpeakers = speakers.flatMap { (1...8).contains($0) ? $0 : nil }
         startHostTime = try c.decodeIfPresent(UInt64.self, forKey: .startHostTime)

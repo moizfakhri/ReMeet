@@ -37,6 +37,9 @@ labels run locally with open models. There is no account, no server and no subsc
   <kbd>⌥</kbd><kbd>⌘</kbd><kbd>N</kbd>, to type a note. <kbd>Return</kbd> saves a note,
   <kbd>⌘</kbd><kbd>Return</kbd> saves an action item, and an empty <kbd>Return</kbd> drops a
   bookmark. Notes are timestamped and appear in the transcript and summary.
+- Automatically hides the pill when Zoom, Teams, or macOS screen sharing starts, and lets you
+  hide or show it anytime with <kbd>⌥</kbd><kbd>⌘</kbd><kbd>H</kbd> (or disable the pill in
+  Settings and use the menu bar + <kbd>⌥</kbd><kbd>⌘</kbd><kbd>N</kbd> on demand).
 
 <p align="center">
   <picture>
@@ -56,6 +59,10 @@ labels run locally with open models. There is no account, no server and no subsc
   (<kbd>⌘</kbd><kbd>L</kbd>). Answers cite the passages they came from.
 - **Copy for AI** (<kbd>⇧</kbd><kbd>⌘</kbd><kbd>C</kbd>) puts the whole meeting on the clipboard
   as Markdown, ready to paste into any assistant.
+- **Auto-export Markdown for AI agents** (<kbd>⇧</kbd><kbd>⌘</kbd><kbd>E</kbd>): each folder can
+  point to a local directory on disk where ReMeet automatically writes and updates clean `.md`
+  files (YAML frontmatter, folder context, notes, summary, checkbox action items, and full
+  transcript) so tools like Claude Code or Cursor can read meeting context directly from disk.
 - Folders group meetings by team or project. Each folder has a context note that is passed to
   its summaries.
 
@@ -133,8 +140,10 @@ docs/                 Performance measurements and README images
 ```
 
 A meeting is a folder: `~/ReMeet/meetings/<date>_<time>_<title>/` holding the audio plus JSON
-and Markdown for notes, transcript and summary. Measured CPU, memory and processing times are in
-[docs/performance.md](docs/performance.md).
+and Markdown for notes, transcript and summary. To move your history to a new Mac, copy
+`~/ReMeet/` (`index.sqlite` and `chunks.sqlite` rebuild automatically on launch). Measured CPU,
+memory and processing times are in [docs/performance.md](docs/performance.md), and the full
+history of changes and benchmarks is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Status
 

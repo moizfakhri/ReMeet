@@ -16,10 +16,15 @@ struct MeetingItem: Identifiable, Equatable {
 @Observable
 final class MeetingLibrary {
     private(set) var items: [MeetingItem] = []
+    /// True once at least one scan of the current storage root has finished.
+    private(set) var hasLoaded = false
     /// The user's folders (collections.json next to the meetings folder).
     private(set) var collections: [MeetingCollection] = []
     var root: URL {
-        didSet { loadCollections() }
+        didSet {
+            hasLoaded = false
+            loadCollections()
+        }
     }
 
     init(root: URL = MeetingFolder.defaultRoot) {
@@ -38,22 +43,38 @@ final class MeetingLibrary {
     }
 
     @discardableResult
-    func createCollection(named name: String) -> MeetingCollection? {
+    func createCollection(named name: String, context: String = "", exportDirectoryPath: String? = nil) -> MeetingCollection? {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        let collection = MeetingCollection(name: trimmed)
+        let cleanedExport = exportDirectoryPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let collection = MeetingCollection(name: trimmed, context: context,
+                                           exportDirectoryPath: (cleanedExport?.isEmpty == false) ? cleanedExport : nil)
         saveCollections(collections + [collection])
         return collection
     }
 
-    func updateCollection(_ id: String, name: String? = nil, context: String? = nil) {
+    /// Pass `exportDirectoryPath: .some(nil)` to clear the export folder, or `.none` to leave it unchanged.
+    func updateCollection(_ id: String, name: String? = nil, context: String? = nil,
+                          exportDirectoryPath: String?? = nil) {
         var list = collections
         guard let index = list.firstIndex(where: { $0.id == id }) else { return }
+        let oldExport = list[index].exportDirectoryPath
+        let oldName = list[index].name
+        let oldContext = list[index].context
         if let name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             list[index].name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         if let context { list[index].context = context }
+        if let exportDirectoryPath {
+            let trimmed = exportDirectoryPath?.trimmingCharacters(in: .whitespacesAndNewlines)
+            list[index].exportDirectoryPath = (trimmed?.isEmpty == false) ? trimmed : nil
+        }
         saveCollections(list)
+        let updated = list[index]
+        if updated.exportDirectoryPath != oldExport
+            || (updated.exportDirectoryPath != nil && (updated.name != oldName || updated.context != oldContext)) {
+            onCollectionExportChanged?(updated)
+        }
     }
 
     /// Removes the folder; its meetings stay, just without a folder.
@@ -99,6 +120,7 @@ final class MeetingLibrary {
         Task {
             let scanned = await Task.detached(priority: .userInitiated) { Self.scan(root) }.value
             guard mine == self.generation else { return }
+            self.hasLoaded = true
             if scanned != self.items { self.items = scanned }
             let completions = self.pendingCompletions
             self.pendingCompletions = []
@@ -109,6 +131,7 @@ final class MeetingLibrary {
     /// Synchronous rescan, for snapshots, self-tests and one-off recovery.
     func reloadNow() {
         generation += 1
+        hasLoaded = true
         items = Self.scan(root)
         let completions = pendingCompletions
         pendingCompletions = []
@@ -141,8 +164,10 @@ final class MeetingLibrary {
         }
     }
 
-    /// Called after a user edit (rename, notes) so search stays current.
+    /// Called after a user edit (rename, notes, folder move) so search and exports stay current.
     var onEdited: ((MeetingFolder) -> Void)?
+    /// Called after a folder's export path (or its name/context while exported) changes.
+    var onCollectionExportChanged: ((MeetingCollection) -> Void)?
     /// Called after a meeting is moved to the Trash so queues, badges and search stay clean.
     var onTrashed: ((MeetingFolder) -> Void)?
 
@@ -160,9 +185,25 @@ final class MeetingLibrary {
 
     /// Moves the folder to the Trash (recoverable), never deletes outright.
     func moveToTrash(_ folder: MeetingFolder) throws {
+        let exportedPath = item(for: folder)?.meta.exportedMarkdownPath
+            ?? (try? folder.readMeta())?.exportedMarkdownPath
         try FileManager.default.trashItem(at: folder.url, resultingItemURL: nil)
         items.removeAll { $0.folder == folder }
+        if let exportedPath {
+            Task.detached(priority: .utility) { MeetingExporter.removeExportedFile(at: exportedPath) }
+        }
         onTrashed?(folder)
+    }
+
+    /// Background recovery + initial scan for launch: never reads `meta.json` files on the main thread.
+    func recoverAndReload(except live: MeetingFolder?, then: (() -> Void)? = nil) {
+        let root = root
+        Task {
+            _ = await Task.detached(priority: .utility) {
+                Self.recoverInterrupted(in: root, except: live)
+            }.value
+            self.reload(then: then)
+        }
     }
 
     /// Meetings whose meta.json still says "recording" but that are not the live recording:
@@ -170,6 +211,12 @@ final class MeetingLibrary {
     /// pipeline picks them up. Returns the folders it fixed.
     @discardableResult
     func recoverInterruptedRecordings(except live: MeetingFolder?) -> [MeetingFolder] {
+        let fixed = Self.recoverInterrupted(in: root, except: live)
+        if !fixed.isEmpty { reloadNow() }
+        return fixed
+    }
+
+    nonisolated private static func recoverInterrupted(in root: URL, except live: MeetingFolder?) -> [MeetingFolder] {
         var fixed: [MeetingFolder] = []
         for folder in MeetingFolder.scan(root: root) where folder != live {
             guard var meta = try? folder.readMeta(), meta.status == .recording else { continue }
@@ -188,7 +235,6 @@ final class MeetingLibrary {
                                             detail: "ReMeet stopped before the recording was finalized; WAV headers repaired"))
             if (try? folder.writeMeta(meta)) != nil { fixed.append(folder) }
         }
-        if !fixed.isEmpty { reloadNow() }
         return fixed
     }
 }

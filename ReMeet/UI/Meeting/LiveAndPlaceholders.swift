@@ -125,12 +125,12 @@ struct RegenerateMenuContent: View {
 
     private var canRedoTranscription: Bool {
         guard let document, document.meta.status != .recording else { return false }
-        return AppModel.reprocessStart(document.folder) < .summarize
+        return document.reprocessStart < .summarize
     }
 
     private var canFindSpeakers: Bool {
         guard let document, document.meta.status != .recording else { return false }
-        return AppModel.reprocessStart(document.folder) < .transcribe
+        return document.reprocessStart < .transcribe
     }
 
     private var canRegenerateSummary: Bool {

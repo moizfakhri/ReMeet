@@ -3,7 +3,9 @@ import Observation
 import ReMeetKit
 
 /// Everything the meeting detail view shows, read from one folder. Edits write straight
-/// back to the folder's JSON files.
+/// back to the folder's JSON files. Derived metadata and speaker summaries are precomputed
+/// off the main thread when loaded so SwiftUI body passes never hit FileManager or scan
+/// full transcripts/embeddings on every render.
 @MainActor
 @Observable
 final class MeetingDocument {
@@ -16,6 +18,21 @@ final class MeetingDocument {
     private(set) var diarization: Diarization?
     private(set) var loadError: String?
 
+    struct ClipRange: Equatable, Sendable {
+        var start: Double
+        var end: Double
+    }
+
+    // Precomputed derived state (updated on load / mutation, never computed inside SwiftUI body).
+    private(set) var wordCount: Int = 0
+    private(set) var originalAudioURLs: [URL] = []
+    private(set) var hasSystemTrack: Bool = false
+    private(set) var reprocessStart: PipelineStage = .compress
+    private(set) var notesChangedSinceSummary: Bool = false
+    private(set) var callSpeakers: [String] = []
+    private(set) var speakerClips: [String: ClipRange] = [:]
+    private(set) var speakerAlike: [String: SpeakerLikeness.Pair] = [:]
+
     /// Everything read from disk for one meeting. Built off the main thread.
     struct Contents: Sendable {
         var meta: MeetingMeta
@@ -25,6 +42,14 @@ final class MeetingDocument {
         var speakers: SpeakerNames
         var diarization: Diarization?
         var error: String?
+        var wordCount: Int = 0
+        var originalAudioURLs: [URL] = []
+        var hasSystemTrack: Bool = false
+        var reprocessStart: PipelineStage = .compress
+        var notesChangedSinceSummary: Bool = false
+        var callSpeakers: [String] = []
+        var speakerClips: [String: ClipRange] = [:]
+        var speakerAlike: [String: SpeakerLikeness.Pair] = [:]
 
         static func read(_ folder: MeetingFolder) -> Contents? {
             guard let meta = try? folder.readMeta() else { return nil }
@@ -37,7 +62,33 @@ final class MeetingDocument {
             } catch {
                 contents.error = "Could not read this meeting's files: \(error.localizedDescription)"
             }
+            contents.computeDerived(folder: folder)
             return contents
+        }
+
+        mutating func computeDerived(folder: MeetingFolder) {
+            wordCount = transcript?.wordCount ?? 0
+            originalAudioURLs = folder.originalAudioURLs()
+            hasSystemTrack = folder.exists(.system16k)
+            reprocessStart = AppModel.reprocessStart(folder)
+            let notesDate = (try? FileManager.default.attributesOfItem(atPath: folder.file(.notes).path))?[.modificationDate] as? Date
+            let summaryDate = (try? FileManager.default.attributesOfItem(atPath: folder.file(.summary).path))?[.modificationDate] as? Date
+            notesChangedSinceSummary = if let notesDate, let summaryDate { notesDate > summaryDate } else { false }
+            let segments = transcript?.segments ?? []
+            var seen: [String] = []
+            for segment in segments where segment.source == .system && segment.speaker != SpeakerNames.youID {
+                if !seen.contains(segment.speaker) { seen.append(segment.speaker) }
+            }
+            callSpeakers = seen
+            var clips: [String: ClipRange] = [:]
+            for id in seen {
+                if let clip = SpeakerClip.excerpt(speaker: id, segments: segments) {
+                    clips[id] = ClipRange(start: clip.start, end: clip.end)
+                }
+            }
+            speakerClips = clips
+            let pairs = SpeakerLikeness.pairs(diarization?.embeddings ?? [:], order: seen)
+            speakerAlike = Dictionary(uniqueKeysWithValues: pairs.map { ($0.source, $0) })
         }
     }
 
@@ -76,6 +127,32 @@ final class MeetingDocument {
         speakers = contents.speakers
         diarization = contents.diarization
         loadError = contents.error
+        wordCount = contents.wordCount
+        originalAudioURLs = contents.originalAudioURLs
+        hasSystemTrack = contents.hasSystemTrack
+        reprocessStart = contents.reprocessStart
+        notesChangedSinceSummary = contents.notesChangedSinceSummary
+        callSpeakers = contents.callSpeakers
+        speakerClips = contents.speakerClips
+        speakerAlike = contents.speakerAlike
+    }
+
+    private func recomputeSpeakersDerived() {
+        let segments = transcript?.segments ?? []
+        var seen: [String] = []
+        for segment in segments where segment.source == .system && segment.speaker != SpeakerNames.youID {
+            if !seen.contains(segment.speaker) { seen.append(segment.speaker) }
+        }
+        callSpeakers = seen
+        var clips: [String: ClipRange] = [:]
+        for id in seen {
+            if let clip = SpeakerClip.excerpt(speaker: id, segments: segments) {
+                clips[id] = ClipRange(start: clip.start, end: clip.end)
+            }
+        }
+        speakerClips = clips
+        let pairs = SpeakerLikeness.pairs(diarization?.embeddings ?? [:], order: seen)
+        speakerAlike = Dictionary(uniqueKeysWithValues: pairs.map { ($0.source, $0) })
     }
 
     func rename(_ title: String) {
@@ -145,6 +222,7 @@ final class MeetingDocument {
             writeSummaryMarkdown()
         }
         writeTranscriptMarkdown()
+        recomputeSpeakersDerived()
         if let name = speakers.names[target] { rememberVoice(target, name: name) }
     }
 
@@ -177,18 +255,30 @@ final class MeetingDocument {
         let sorted = notes.sorted { $0.t < $1.t }
         self.notes = sorted
         try? NotesFile(url: folder.file(.notes)).save(sorted)
+        if summary != nil { notesChangedSinceSummary = true }
         writeTranscriptMarkdown()
         writeSummaryMarkdown()
     }
 
     private func writeTranscriptMarkdown() {
         guard let transcript else { return }
-        try? folder.writeText(TranscriptMarkdown.render(transcript, notes: notes, speakers: speakers,
-                                                        title: meta.title), .transcriptMarkdown)
+        let folder = folder
+        let notes = notes
+        let speakers = speakers
+        let title = meta.title
+        Task.detached(priority: .utility) {
+            try? folder.writeText(TranscriptMarkdown.render(transcript, notes: notes, speakers: speakers,
+                                                            title: title), .transcriptMarkdown)
+        }
     }
 
     private func writeSummaryMarkdown() {
         guard let summary else { return }
-        try? folder.writeText(SummaryMarkdown.render(summary, meta: meta, notes: notes), .summaryMarkdown)
+        let folder = folder
+        let meta = meta
+        let notes = notes
+        Task.detached(priority: .utility) {
+            try? folder.writeText(SummaryMarkdown.render(summary, meta: meta, notes: notes), .summaryMarkdown)
+        }
     }
 }

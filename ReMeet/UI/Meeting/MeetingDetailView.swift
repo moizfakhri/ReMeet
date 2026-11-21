@@ -27,7 +27,7 @@ struct MeetingDetailView: View {
     var body: some View {
         ScrollViewReader { proxy in
         ScrollView {
-            VStack(alignment: .leading, spacing: 26) {
+            VStack(alignment: .leading, spacing: 24) {
                 header
                 MeetingChatPanel(document: document, player: player, showTranscript: $showTranscript)
                     .id(MeetingChatPanel.anchorID)
@@ -41,13 +41,16 @@ struct MeetingDetailView: View {
                             .font(.callout)
                             .foregroundStyle(Theme.fg)
                             .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
                         Button("Dismiss") { model.queue.clearNotice(document.folder) }
                             .buttonStyle(.plain)
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(Theme.accent)
                     }
+                    .padding(12)
+                    .background(Theme.bg, in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.line))
                 }
-                SpeakerNamingSection(document: document, meetingPlayer: player)
                 if document.meta.status != .summarized || model.queue.isWorking(on: document.folder) {
                     ProcessingStatusView(meta: document.meta,
                                          activity: model.queue.current?.folder == document.folder ? model.queue.current : nil,
@@ -67,26 +70,46 @@ struct MeetingDetailView: View {
                 if let summary = document.summary {
                     PointsSection(title: "Decisions", points: summary.decisions, onJump: jump)
                     PointsSection(title: "Open questions", points: summary.openQuestions, onJump: jump)
+                }
+                SpeakerNamingSection(document: document, meetingPlayer: player)
+                if document.summary != nil {
                     footer
                 }
             }
-            .frame(maxWidth: 620, alignment: .leading)
+            .frame(maxWidth: 640, alignment: .leading)
             .padding(.horizontal, 40)
-            .padding(.top, 28)
-            .padding(.bottom, 120)
+            .padding(.top, 26)
+            .padding(.bottom, 128)
             .frame(maxWidth: .infinity)
         }
         .background(Theme.surface)
         .overlay(alignment: .bottom) {
-            PlayerCapsule(player: player, notes: document.notes)
-                .padding(.bottom, 18)
-                .padding(.horizontal, 24)
+            VStack(spacing: 0) {
+                LinearGradient(colors: [Theme.surface.opacity(0), Theme.surface.opacity(0.92), Theme.surface],
+                               startPoint: .top, endPoint: .bottom)
+                    .frame(height: 36)
+                    .allowsHitTesting(false)
+                Theme.surface
+                    .frame(height: 54)
+                    .allowsHitTesting(false)
+            }
+            .overlay(alignment: .bottom) {
+                PlayerCapsule(player: player, notes: document.notes)
+                    .padding(.bottom, 18)
+                    .padding(.horizontal, 24)
+            }
         }
         .onAppear {
             title = document.meta.title
             scrollToChatIfNeeded(proxy)
         }
         .onDisappear { if titleFocused { commitTitle() } }
+        .onChange(of: document.folder.id) { _, _ in
+            if titleFocused { titleFocused = false }
+            title = document.meta.title
+            wordingStatus = nil
+            wordingFailed = false
+        }
         .onChange(of: document.meta.title) { _, new in if !titleFocused { title = new } }
         .onChange(of: model.chatFocusPending) { _, _ in scrollToChatIfNeeded(proxy) }
         }
@@ -98,7 +121,7 @@ struct MeetingDetailView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 10) {
             TextField("Title", text: $title, axis: .vertical)
                 .textFieldStyle(.plain)
                 .font(Fonts.title)
@@ -106,30 +129,45 @@ struct MeetingDetailView: View {
                 .focused($titleFocused)
                 .onSubmit(commitTitle)
                 .onChange(of: titleFocused) { _, focused in if !focused { commitTitle() } }
+
+            // Row 1: Pure meeting facts (never competes with interactive menus or truncates).
             HStack(spacing: 6) {
-                Text(document.meta.startTime.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)))
-                Text("·")
+                Text(document.meta.startTime.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day()))
+                Text("·").foregroundStyle(Theme.fg3)
                 Text(document.meta.startTime.formatted(date: .omitted, time: .shortened))
-                Text("·")
-                Text(TimeFormat.duration(document.meta.effectiveDuration))
-                if let count = document.transcript?.wordCount, count > 0 {
-                    Text("·")
-                    Text("\(count.formatted()) words")
+                if document.meta.effectiveDuration > 0 {
+                    Text("·").foregroundStyle(Theme.fg3)
+                    Text(TimeFormat.duration(document.meta.effectiveDuration))
                 }
-                callSpeakerMenu
-                engineMenu
+                if document.wordCount > 0 {
+                    Text("·").foregroundStyle(Theme.fg3)
+                    Text("\(document.wordCount.formatted()) words")
+                }
                 if let app = MeetingApps.displayName(for: document.meta.sourceApp) {
                     Text(app)
-                        .font(.system(size: 12))
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(Theme.fg2)
                         .padding(.horizontal, 8)
-                        .padding(.vertical, 1)
+                        .padding(.vertical, 2)
+                        .background(Theme.bg, in: Capsule())
                         .overlay(Capsule().stroke(Theme.line))
+                        .padding(.leading, 4)
                 }
+                Spacer(minLength: 0)
             }
             .font(.system(size: 13))
-            .lineLimit(1)
-            .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
             .foregroundStyle(Theme.fg2)
+            .lineLimit(1)
+
+            // Row 2: Compact pill controls for folder, speakers, and transcription wording.
+            HStack(spacing: 8) {
+                folderMenu
+                callSpeakerMenu
+                engineMenu
+                Spacer(minLength: 0)
+            }
+            .font(.system(size: 12))
+
             if let wordingStatus {
                 HStack(spacing: 8) {
                     Text(wordingStatus)
@@ -146,10 +184,52 @@ struct MeetingDetailView: View {
             } else if let written = document.meta.processing.transcriptionEngine, !written.isEmpty {
                 Text(written.contains("Sonnet") ? "Wording: \(written)" : "Wording: \(written). Sonnet 5.5 has not cleaned this yet.")
                     .font(.system(size: 12))
-                    .foregroundStyle(written.contains("Sonnet") ? Theme.fg2 : .orange)
+                    .foregroundStyle(written.contains("Sonnet") ? Theme.fg3 : .orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    private var folderMenu: some View {
+        let current = model.library.collection(document.meta.collectionID)
+        return Menu {
+            Button("No Folder") { model.library.move(document.folder, to: nil) }
+                .disabled(current == nil)
+            if !model.library.collections.isEmpty { Divider() }
+            ForEach(model.library.collections) { folder in
+                Button {
+                    model.library.move(document.folder, to: folder.id)
+                } label: {
+                    if folder.exportDirectoryPath != nil {
+                        Label(folder.name, systemImage: "arrow.down.doc")
+                    } else {
+                        Text(folder.name)
+                    }
+                }
+                .disabled(current?.id == folder.id)
+            }
+            if let exported = document.meta.exportedMarkdownPath, !exported.isEmpty {
+                Divider()
+                Button("Reveal Exported .md") {
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: exported)])
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: current?.exportDirectoryPath != nil ? "folder.badge.gearshape" : "folder")
+                    .font(.system(size: 11))
+                Text(current?.name ?? "No folder")
+            }
+            .foregroundStyle(current != nil ? Theme.accent : Theme.fg2)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+        .background(current != nil ? Theme.mark : Theme.bg, in: Capsule())
+        .overlay(Capsule().stroke(current != nil ? Theme.accent.opacity(0.25) : Theme.line))
+        .help(current?.exportDirectoryPath.map { "In \u{201C}\(current!.name)\u{201D} · auto-exporting .md to \($0)" }
+              ?? "Assign this meeting to a folder")
     }
 
     private var callSpeakerMenu: some View {
@@ -160,10 +240,19 @@ struct MeetingDetailView: View {
                 Button("\(count)") { model.applyCallSpeakers(document, count: count) }
             }
         } label: {
-            Text(document.meta.expectedCallSpeakers.map { "\($0) call" } ?? "Call speakers")
+            HStack(spacing: 4) {
+                Image(systemName: "person.2")
+                    .font(.system(size: 10.5))
+                Text(document.meta.expectedCallSpeakers.map { "\($0) call" } ?? "Call speakers")
+            }
+            .foregroundStyle(Theme.fg2)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+        .background(Theme.bg, in: Capsule())
+        .overlay(Capsule().stroke(Theme.line))
         .help("How many voices to find on the call, besides you. Changing this finds the voices again. A name stays with a person only when the new voice still matches. Renaming someone does not do this.")
     }
 
@@ -190,10 +279,19 @@ struct MeetingDetailView: View {
                 }
             }
         } label: {
-            Text(wordingLabel)
+            HStack(spacing: 4) {
+                Image(systemName: "waveform.and.magnifyingglass")
+                    .font(.system(size: 10.5))
+                Text(wordingLabel)
+            }
+            .foregroundStyle(Theme.fg2)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+        .background(Theme.bg, in: Capsule())
+        .overlay(Capsule().stroke(Theme.line))
         .help(engineHelp)
     }
 
@@ -215,7 +313,7 @@ struct MeetingDetailView: View {
     }
 
     private var canRedoTranscription: Bool {
-        document.meta.status != .recording && AppModel.reprocessStart(document.folder) < .summarize
+        document.meta.status != .recording && document.reprocessStart < .summarize
     }
 
     private var meetingEngineLabel: String {
@@ -270,7 +368,7 @@ struct MeetingDetailView: View {
         document.rename(title)
         guard document.meta.title != before else { return }
         model.library.refresh(document.folder)
-        model.reindex(document.folder)
+        model.documentEdited(document, reindexSearch: true)
     }
 
     private func jump(_ t: Double) {
@@ -313,6 +411,7 @@ struct JumpLink: View {
 }
 
 private struct SummarySections: View {
+    @Environment(AppModel.self) private var model
     let summary: MeetingSummary
     let document: MeetingDocument
     let onJump: (Double) -> Void
@@ -332,6 +431,7 @@ private struct SummarySections: View {
                 ForEach(summary.actionItems) { item in
                     ActionItemRow(item: item, onJump: onJump) { done in
                         document.setActionItem(item, done: done)
+                        model.documentEdited(document)
                     }
                 }
             }
@@ -367,6 +467,7 @@ private struct ActionItemRow: View {
     @State private var hovering = false
 
     var body: some View {
+        let meta = [item.owner, item.due].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Toggle("", isOn: Binding(get: { item.done }, set: onToggle))
                 .toggleStyle(.checkbox)
@@ -379,11 +480,37 @@ private struct ActionItemRow: View {
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
             if let t = item.t { JumpLink(t: t, action: onJump, visible: hovering) }
-            Text([item.owner, item.due].compactMap { $0 }.joined(separator: ", "))
-                .font(.system(size: 12.5))
-                .foregroundStyle(Theme.fg2)
+            if !meta.isEmpty {
+                Text(meta)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(Theme.fg2)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 2)
+                    .background(Theme.bg, in: Capsule())
+                    .overlay(Capsule().stroke(Theme.line))
+            }
         }
         .onHover { hovering = $0 }
+    }
+}
+
+/// Isolates `player.currentTime` observation so playback ticks (10 Hz) only re-render this
+/// tiny button instead of invalidating the entire `NotesSection` on every frame.
+private struct AddNoteAtPlayheadButton: View {
+    let player: PlayerModel
+    let onAdd: (Double) -> Void
+
+    var body: some View {
+        Button {
+            onAdd((player.currentTime * 10).rounded() / 10)
+        } label: {
+            Label("Add at \(TimeFormat.clock(player.currentTime))", systemImage: "plus")
+                .font(.system(size: 12))
+                .hitTarget()
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Theme.accent)
+        .help("Add a note at the player's position")
     }
 }
 
@@ -402,21 +529,14 @@ private struct NotesSection: View {
             HStack {
                 SectionHeader(title: "Your notes")
                 Spacer()
-                Button {
-                    let note = MeetingNote(t: (player.currentTime * 10).rounded() / 10, text: "", kind: .note)
+                AddNoteAtPlayheadButton(player: player) { timestamp in
+                    let note = MeetingNote(t: timestamp, text: "", kind: .note)
                     save(document.notes + [note])
                     draft = ""
                     editing = note.id
-                } label: {
-                    Label("Add at \(TimeFormat.clock(player.currentTime))", systemImage: "plus")
-                        .font(.system(size: 12))
-                        .hitTarget()
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(Theme.accent)
-                .help("Add a note at the player's position")
             }
-            if document.summary != nil, model.notesChangedSinceSummary(document) {
+            if document.summary != nil, document.notesChangedSinceSummary {
                 HStack(spacing: 10) {
                     Text("Your notes changed since the summary was written.")
                         .font(.callout).foregroundStyle(Theme.fg2)
@@ -545,13 +665,15 @@ private struct PointsSection: View {
 
 // MARK: - Who else spoke
 
-/// One row per non-user voice: a short clip from the call track, a name, and at most one voiceprint suggestion.
+/// One row per non-user voice: a short clip from the call track, an inline name field,
+/// and at most one voiceprint suggestion.
 private struct SpeakerNamingSection: View {
     @Environment(AppModel.self) private var model
     let document: MeetingDocument
     let meetingPlayer: PlayerModel
     @State private var drafts: [String: String] = [:]
     @State private var memory = SpeakerMemory()
+    @State private var suggestions: [String: String] = [:]
     @State private var preview = SpeakerClipPlayer()
     @State private var savedID: String?
     @State private var notice: String?
@@ -559,66 +681,99 @@ private struct SpeakerNamingSection: View {
     @State private var cleaning = false
     @State private var cleanGeneration = 0
 
-    private var people: [String] {
-        var seen: [String] = []
-        for segment in document.transcript?.segments ?? [] where segment.source == .system && segment.speaker != SpeakerNames.youID {
-            if !seen.contains(segment.speaker) { seen.append(segment.speaker) }
-        }
-        return seen
-    }
+    @State private var expanded = false
 
-    private var suggestions: [String: String] {
-        let embeddings = document.diarization?.embeddings ?? [:]
-        let offered = memory.suggestions(for: embeddings, existing: document.speakers)
-        return Dictionary(uniqueKeysWithValues: offered.map { ($0.speaker, $0.name) })
+    private var unnamedCount: Int {
+        document.callSpeakers.filter { id in
+            SpeakerMemory.isPlaceholder(document.speakers.names[id] ?? "")
+        }.count
     }
 
     var body: some View {
-        let ids = people
+        let ids = document.callSpeakers
         if !ids.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                SectionHeader(title: "Who else spoke")
-                Text("Select their words in the transcript and type their name. ReMeet remembers that voice for the next meeting. Two rows that are the same person stay separate until you merge them.")
-                    .font(.caption)
-                    .foregroundStyle(Theme.fg2)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let notice {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(notice)
-                            .font(.caption)
-                            .foregroundStyle(noticeIsError ? .orange : Theme.accent)
-                            .fixedSize(horizontal: false, vertical: true)
-                        if cleaning {
-                            Button("Stop", action: stopCleaning)
-                                .buttonStyle(.plain)
-                                .font(.caption.weight(.semibold))
+                Button {
+                    withAnimation(.snappy(duration: 0.18)) { expanded.toggle() }
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Theme.fg3)
+                            .rotationEffect(.degrees(expanded ? 90 : 0))
+                            .frame(width: 12)
+                        SectionHeader(title: "Speakers")
+                        Text(ids.map { document.speakers.displayName(for: $0) }.joined(separator: ", "))
+                            .font(.system(size: 13))
+                            .foregroundStyle(Theme.fg2)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Spacer(minLength: 8)
+                        if !expanded, unnamedCount > 0 {
+                            Text("\(unnamedCount) unnamed")
+                                .font(.system(size: 11, weight: .medium))
                                 .foregroundStyle(Theme.accent)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(Theme.mark, in: Capsule())
                         }
                     }
+                    .contentShape(Rectangle())
                 }
-                ForEach(ids, id: \.self) { id in
-                    row(id, people: ids, alike: alike[id])
+                .buttonStyle(.plain)
+
+                if expanded {
+                    Text("Play a clip and type a name, or select their words in the transcript. ReMeet remembers each voice for later meetings.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.fg2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let notice {
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            Text(notice)
+                                .font(.caption)
+                                .foregroundStyle(noticeIsError ? .orange : Theme.accent)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if cleaning {
+                                Button("Stop", action: stopCleaning)
+                                    .buttonStyle(.plain)
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(Theme.accent)
+                            }
+                        }
+                    }
+                    ForEach(ids, id: \.self) { id in
+                        row(id, people: ids, alike: document.speakerAlike[id])
+                    }
                 }
             }
-            .task(id: document.folder.id) { load(ids) }
+            .padding(14)
+            .background(Theme.bg.opacity(0.6), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.line))
+            .task(id: document.folder.id) {
+                preview.pause()
+                savedID = nil
+                notice = nil
+                expanded = false
+                await load(ids)
+            }
             .onChange(of: document.speakers) { _, _ in
                 for id in ids where drafts[id] == nil {
                     drafts[id] = document.speakers.names[id] ?? ""
                 }
+                recomputeSuggestions()
             }
+            .onDisappear { preview.pause() }
         }
     }
 
-    private var alike: [String: SpeakerLikeness.Pair] {
-        let pairs = SpeakerLikeness.pairs(document.diarization?.embeddings ?? [:], order: people)
-        return Dictionary(uniqueKeysWithValues: pairs.map { ($0.source, $0) })
-    }
-
     private func row(_ id: String, people: [String], alike: SpeakerLikeness.Pair?) -> some View {
-        let clip = SpeakerClip.excerpt(speaker: id, segments: document.transcript?.segments ?? [])
-        let canPlay = clip != nil && document.folder.exists(.system16k)
+        let clip = document.speakerClips[id]
+        let canPlay = clip != nil && document.hasSystemTrack
         let playing = preview.playingID == id
         let sameName = duplicate(of: id, among: people)
+        let currentDraft = (drafts[id] ?? document.speakers.names[id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let savedName = (document.speakers.names[id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let dirty = currentDraft != savedName
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Button {
@@ -632,10 +787,18 @@ private struct SpeakerNamingSection: View {
                 .buttonStyle(.plain)
                 .disabled(!canPlay && !playing)
                 .help(playing ? "Pause this clip" : (canPlay ? "Play a short clip of this voice from the call audio" : "The call audio for this clip is no longer on disk"))
-                Text(document.speakers.displayName(for: id))
+                TextField(document.speakers.displayName(for: id), text: binding(id))
+                    .textFieldStyle(.plain)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.fg)
-                if savedID == id && !cleaning {
+                    .frame(maxWidth: 180)
+                    .onSubmit { commit(id, name: drafts[id] ?? "") }
+                if dirty {
+                    Button("Save") { commit(id, name: drafts[id] ?? "") }
+                        .buttonStyle(.plain)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Theme.accent)
+                } else if savedID == id && !cleaning {
                     Text("Saved")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(Theme.accent)
@@ -694,11 +857,25 @@ private struct SpeakerNamingSection: View {
         )
     }
 
-    private func load(_ ids: [String]) {
-        memory = SpeakerMemoryFile.load(SpeakerMemoryFile.url(beside: document.folder))
+    private func load(_ ids: [String]) async {
+        let url = SpeakerMemoryFile.url(beside: document.folder)
+        let loaded = await Task.detached(priority: .utility) { SpeakerMemoryFile.load(url) }.value
+        guard !Task.isCancelled else { return }
+        memory = loaded
         var next: [String: String] = [:]
         for id in ids { next[id] = document.speakers.names[id] ?? "" }
         drafts = next
+        recomputeSuggestions()
+    }
+
+    private func recomputeSuggestions() {
+        let embeddings = document.diarization?.embeddings ?? [:]
+        guard !embeddings.isEmpty, !memory.voices.isEmpty else {
+            suggestions = [:]
+            return
+        }
+        let offered = memory.suggestions(for: embeddings, existing: document.speakers)
+        suggestions = Dictionary(uniqueKeysWithValues: offered.map { ($0.speaker, $0.name) })
     }
 
     private func toggleClip(_ id: String) {
@@ -706,8 +883,7 @@ private struct SpeakerNamingSection: View {
             preview.pause()
             return
         }
-        guard let clip = SpeakerClip.excerpt(speaker: id, segments: document.transcript?.segments ?? []),
-              document.folder.exists(.system16k) else { return }
+        guard let clip = document.speakerClips[id], document.hasSystemTrack else { return }
         meetingPlayer.pause()
         preview.play(id: id, url: document.folder.file(.system16k), start: clip.start, end: clip.end)
     }
@@ -734,8 +910,9 @@ private struct SpeakerNamingSection: View {
         savedID = target
         notice = "Merged into \(document.speakers.displayName(for: target))."
         noticeIsError = false
+        recomputeSuggestions()
         model.library.refresh(document.folder)
-        model.reindex(document.folder)
+        model.documentEdited(document, reindexSearch: true)
         scheduleClean()
     }
 
@@ -743,11 +920,12 @@ private struct SpeakerNamingSection: View {
         drafts[id] = name
         document.renameSpeaker(id, to: name)
         memory = SpeakerMemoryFile.load(SpeakerMemoryFile.url(beside: document.folder))
+        recomputeSuggestions()
         savedID = id
         notice = "Saved \(document.speakers.displayName(for: id))."
         noticeIsError = false
         model.library.refresh(document.folder)
-        model.reindex(document.folder)
+        model.documentEdited(document, reindexSearch: true)
         scheduleClean()
     }
 
@@ -847,8 +1025,15 @@ struct ProcessingStatusView: View {
                     Text("Your audio is safe. Retry picks up at this step.")
                         .font(.caption)
                         .foregroundStyle(Theme.fg2)
-                    Button("Retry", action: onRetry)
-                        .buttonStyle(.glassProminent)
+                    Button(action: onRetry) {
+                        Text("Retry")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 6)
+                            .background(Theme.accentFill, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
                 }
                 .padding(.top, 6)
             } else if activity != nil || stopping {

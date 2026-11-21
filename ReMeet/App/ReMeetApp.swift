@@ -75,29 +75,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 SnapshotRenderer.run(into: directory, model: AppModel.shared)
                 return
             }
-            AppModel.shared.launch()
+            let openOnLaunch = Self.shouldOpenWindowOnLaunch()
+            AppModel.shared.launch(openWindowOnLaunch: openOnLaunch)
         }
     }
 
-    /// Dock / Finder reactivation. Without this, LSUIElement + suppressed Window
-    /// scenes leave Dock clicks as a no-op when nothing is visible.
+    /// Hybrid launch behavior:
+    /// - Launched at login (Login Item) or from CLI/perf/background scripts -> stay quiet in the menu bar.
+    /// - Launched interactively by the user (Spotlight, Applications, Finder, Dock) -> open the
+    ///   meetings window immediately so clicking ReMeet always gives instant feedback.
+    private static func shouldOpenWindowOnLaunch() -> Bool {
+        let args = CommandLine.arguments
+        if args.contains("--background") || args.contains("--perf-open-window")
+            || args.contains("--perf-record-now") || args.contains("-storageFolder") {
+            return false
+        }
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              event.eventID == kAEOpenApplication else {
+            return false
+        }
+        let prop = event.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue
+        if prop == keyAELaunchedAsLogInItem || prop == keyAELaunchedAsServiceItem {
+            return false
+        }
+        return true
+    }
+
+    /// Dock / Finder / Spotlight reactivation. Without this, LSUIElement + suppressed Window
+    /// scenes leave Dock/Spotlight clicks as a no-op when nothing is visible.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         MainActor.assumeIsolated {
             // `flag` is true when the recording bar or the menu is up. Those are not the
-            // meetings window, so a Dock click still has to open it.
-            let window = AppModel.meetingsWindow()
-            if window?.isMiniaturized == true {
-                DockPresence.show("meetings")
-                DockPresence.makeRegularNow()
-                window?.deminiaturize(nil)
-                window?.makeKeyAndOrderFront(nil)
-                NSApp.activate()
-            } else if window?.isVisible == true {
-                window?.makeKeyAndOrderFront(nil)
-                NSApp.activate()
-            } else {
-                AppModel.shared.openMeetings()
-            }
+            // meetings window, so a Dock or Spotlight click still has to open it.
+            AppModel.shared.openMeetings()
         }
         return true
     }

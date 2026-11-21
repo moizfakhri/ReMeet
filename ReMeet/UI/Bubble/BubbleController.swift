@@ -95,19 +95,38 @@ final class BubbleController: NSObject, NSWindowDelegate {
         refreshPill()
     }
 
+    /// Global shortcut (⌥⌘H): hide immediately if visible, or bring back if hidden.
+    func togglePillVisibility() {
+        guard isRecordingActive() else { return }
+        if isVisible {
+            hidePill()
+        } else {
+            showPill()
+        }
+    }
+
     func noteScreenShare(_ sharing: Bool) {
-        if !sharing { broughtBackDuringShare = false }
-        screenSharing = sharing
+        let effective = sharing && UserDefaults.standard.bool(forKey: SettingsKey.autoHideBubbleOnShare)
+        if !effective { broughtBackDuringShare = false }
+        screenSharing = effective
         guard !state.expanded else { return }
         refreshPill()
     }
 
-    /// Polls while a recording is running. Self-tests call `recordingStarted` without this.
+    /// Polls off the main thread while a recording is running so WindowServer IPC
+    /// (`CGWindowListCopyWindowInfo`) and `proc_listallpids` never block UI work.
+    /// Self-tests call `recordingStarted` without this.
     func startShareWatch() {
         guard shareWatch == nil else { return }
         shareWatch = Task { @MainActor [weak self] in
             while let self, !Task.isCancelled, self.isRecordingActive() {
-                self.noteScreenShare(ScreenShareMonitor.isSharing)
+                if UserDefaults.standard.bool(forKey: SettingsKey.autoHideBubbleOnShare) {
+                    let sharing = await Task.detached(priority: .utility) { ScreenShareMonitor.isSharing }.value
+                    guard !Task.isCancelled, self.isRecordingActive() else { break }
+                    self.noteScreenShare(sharing)
+                } else if self.screenSharing {
+                    self.noteScreenShare(false)
+                }
                 try? await Task.sleep(for: .milliseconds(1500))
             }
             self?.shareWatch = nil

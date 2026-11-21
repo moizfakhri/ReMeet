@@ -3,15 +3,32 @@ import Foundation
 /// A user folder for meetings (e.g. one per team or project). The meeting files never move: a
 /// meeting belongs to a folder through `MeetingMeta.collectionID`. The folder's `context` is
 /// written once by the user and goes into that folder's summaries and "Copy for AI".
+/// When `exportDirectoryPath` is set, ReMeet automatically writes AI-ready Markdown files for
+/// meetings in this folder into that local directory.
 public struct MeetingCollection: Codable, Equatable, Identifiable, Sendable {
     public var id: String
     public var name: String
     public var context: String
+    /// Optional local directory path where meetings in this folder auto-export as `.md` files.
+    public var exportDirectoryPath: String?
 
-    public init(id: String = UUID().uuidString, name: String, context: String = "") {
+    public init(id: String = UUID().uuidString, name: String, context: String = "",
+                exportDirectoryPath: String? = nil) {
         self.id = id
         self.name = name
         self.context = context
+        self.exportDirectoryPath = exportDirectoryPath
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, name, context, exportDirectoryPath }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        context = try c.decodeIfPresent(String.self, forKey: .context) ?? ""
+        let raw = try c.decodeIfPresent(String.self, forKey: .exportDirectoryPath)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        exportDirectoryPath = (raw?.isEmpty == false) ? raw : nil
     }
 }
 

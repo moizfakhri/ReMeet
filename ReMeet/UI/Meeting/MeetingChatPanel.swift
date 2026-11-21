@@ -27,45 +27,59 @@ struct MeetingChatPanel: View {
         }
     }
 
+    private var canSubmit: Bool {
+        canAsk && (loading || !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
+    private var isExpanded: Bool {
+        !thread.turns.isEmpty || loading || errorText != nil || focused || !question.isEmpty
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Chat")
-                    .font(.headline)
-                Spacer(minLength: 8)
-                Picker("Scope", selection: $scope) {
-                    ForEach(availableScopes) { value in
-                        Text(value.label).tag(value)
+        VStack(alignment: .leading, spacing: 10) {
+            if isExpanded {
+                HStack(alignment: .center, spacing: 8) {
+                    Label("Ask about meetings", systemImage: "sparkles")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(Theme.fg2)
+                    Spacer(minLength: 8)
+                    Picker("Scope", selection: $scope) {
+                        ForEach(availableScopes) { value in
+                            Text(value.label).tag(value)
+                        }
                     }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(maxWidth: 310)
+                    .disabled(loading)
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .frame(maxWidth: 340)
-                .disabled(loading)
             }
-            if thread.turns.isEmpty, errorText == nil, !loading {
-                Text(emptyMessage)
-                    .font(.callout)
-                    .foregroundStyle(Theme.fg2)
-            }
-            ForEach(Array(thread.turns.enumerated()), id: \.offset) { _, turn in
-                if turn.role == .user {
-                    Text(turn.text)
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(Theme.fg)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                } else {
-                    Text(turn.text)
-                        .font(.callout)
-                        .foregroundStyle(Theme.fg)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                    if !turn.sources.isEmpty {
-                        Text("Sources")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Theme.fg2)
-                        SourcePills(sources: turn.sources, titles: sourceTitles(from: turn.sources))
+            if !thread.turns.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(Array(thread.turns.enumerated()), id: \.offset) { _, turn in
+                        if turn.role == .user {
+                            Text(turn.text)
+                                .font(.callout.weight(.semibold))
+                                .foregroundStyle(Theme.fg)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .textSelection(.enabled)
+                                .padding(.top, 2)
+                        } else {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(turn.text)
+                                    .font(.callout)
+                                    .foregroundStyle(Theme.fg2)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                    .textSelection(.enabled)
+                                if !turn.sources.isEmpty {
+                                    SourcePills(sources: turn.sources, titles: sourceTitles(from: turn.sources))
+                                }
+                            }
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Theme.bg, in: RoundedRectangle(cornerRadius: 8))
+                        }
                     }
                 }
             }
@@ -81,35 +95,77 @@ struct MeetingChatPanel: View {
                         .font(.callout)
                         .foregroundStyle(Theme.fg2)
                 }
+            } else if !canAsk {
+                Text(emptyMessage)
+                    .font(.caption)
+                    .foregroundStyle(Theme.fg2)
             }
             HStack(spacing: 8) {
-                TextField("What did we decide about…?", text: $question, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
+                Image(systemName: "sparkles")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(Theme.accent)
+                TextField("Ask about decisions, action items, or what someone said… (⌘L)", text: $question, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13.5))
+                    .foregroundStyle(Theme.fg)
                     .lineLimit(1...4)
                     .focused($focused)
                     .disabled(!canAsk || loading)
                     .onSubmit { if canAsk { submit() } }
-                Button(loading ? "Stop" : "Ask") {
-                    loading ? cancel() : submit()
+                if !isExpanded {
+                    Menu {
+                        ForEach(availableScopes) { value in
+                            Button {
+                                scope = value
+                            } label: {
+                                if scope == value {
+                                    Label(value.label, systemImage: "checkmark")
+                                } else {
+                                    Text(value.label)
+                                }
+                            }
+                        }
+                    } label: {
+                        Text(scope.label)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(Theme.fg2)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Choose whether to search this meeting, this folder, or all recordings")
                 }
-                .keyboardShortcut(.defaultAction)
-                .buttonStyle(.glassProminent)
-                .disabled(!canAsk || (!loading && question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+                Button {
+                    loading ? cancel() : submit()
+                } label: {
+                    Text(loading ? "Stop" : "Ask")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(canSubmit ? Color.white : Theme.fg3)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                        .background(canSubmit ? Theme.accentFill : Theme.line.opacity(0.6), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSubmit)
             }
         }
-        .padding(16)
-        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.line))
+        .padding(.horizontal, 14)
+        .padding(.vertical, isExpanded ? 12 : 9)
+        .background(Theme.bg.opacity(0.75), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(focused ? Theme.accent.opacity(0.6) : Theme.line))
         .onAppear {
-            loadThread()
             consumeChatFocus()
         }
-        .onChange(of: document.folder.id) { _, _ in
+        .task(id: document.folder.id) {
             cancel()
             question = ""
             errorText = nil
             scope = .thisMeeting
-            loadThread()
+            let url = MeetingChatThread.fileURL(in: document.folder)
+            let loaded = await Task.detached(priority: .userInitiated) {
+                MeetingChatThread.load(from: url)
+            }.value
+            guard !Task.isCancelled else { return }
+            thread = loaded
         }
         .onChange(of: document.meta.collectionID) { _, _ in
             if document.meta.collectionID == nil, scope == .thisFolder {
@@ -155,10 +211,6 @@ struct MeetingChatPanel: View {
             return [.thisMeeting, .allRecordings]
         }
         return MeetingChatScope.allCases
-    }
-
-    private func loadThread() {
-        thread = MeetingChatThread.load(from: MeetingChatThread.fileURL(in: document.folder))
     }
 
     private func consumeChatFocus() {

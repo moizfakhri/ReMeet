@@ -15,11 +15,18 @@ actor ChunkEmbeddingBackend {
     private var mlxContainer: EmbedderModelContainer?
     private var mlxDirectory: String?
     private var mlxModelID: String?
+    private var idleUnloadTask: Task<Void, Never>?
+
+    /// Short-lived cache for LM Studio probe & MLX folder discovery so bursts of edits
+    /// or pipeline ticks do not spam localhost HTTP requests or rescan Models/ every second.
+    private var cachedProbe: (server: String?, modelsRoot: String, modelID: String?, lmStudioModel: String?, at: Date)?
+    private static let probeTTL: TimeInterval = 30
+    private static let idleUnloadSeconds: Double = 30
 
     private let probeSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 2
-        config.timeoutIntervalForResource = 3
+        config.timeoutIntervalForRequest = 0.5
+        config.timeoutIntervalForResource = 0.8
         return URLSession(configuration: config)
     }()
 
@@ -29,6 +36,28 @@ actor ChunkEmbeddingBackend {
         config.timeoutIntervalForResource = 180
         return URLSession(configuration: config)
     }()
+
+    /// Releases the loaded MLX embedder and clears MLX's reusable GPU buffer cache so idle
+    /// memory stays flat and Metal teardown on quit never races an active model.
+    func unload() {
+        idleUnloadTask?.cancel()
+        idleUnloadTask = nil
+        guard mlxContainer != nil else { return }
+        Stream.defaultStream.synchronize()
+        mlxContainer = nil
+        mlxDirectory = nil
+        mlxModelID = nil
+        Memory.clearCache()
+    }
+
+    private func scheduleIdleUnload() {
+        idleUnloadTask?.cancel()
+        idleUnloadTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.idleUnloadSeconds))
+            guard !Task.isCancelled else { return }
+            await self?.unload()
+        }
+    }
 
     func embedOne(_ text: String, modelsRoot: URL, server: URL?) async -> [Float]? {
         guard let vectors = await embed([text], modelsRoot: modelsRoot, server: server) else { return nil }
@@ -45,24 +74,42 @@ actor ChunkEmbeddingBackend {
     }
 
     private func resolvedModelID(modelsRoot: URL, server: URL?) async -> String? {
-        if let server, let id = await loadedLMStudioModel(server: server) {
-            return "lmstudio:\(id)"
+        let now = Date()
+        if let cached = cachedProbe,
+           cached.server == server?.absoluteString,
+           cached.modelsRoot == modelsRoot.path,
+           now.timeIntervalSince(cached.at) < Self.probeTTL {
+            return cached.modelID
         }
-        return await mlxModelID(in: modelsRoot)
+        let lmID = server != nil ? await loadedLMStudioModel(server: server!) : nil
+        let resolved: String?
+        if let lmID {
+            resolved = "lmstudio:\(lmID)"
+        } else {
+            resolved = await mlxModelID(in: modelsRoot)
+        }
+        cachedProbe = (server: server?.absoluteString, modelsRoot: modelsRoot.path,
+                       modelID: resolved, lmStudioModel: lmID, at: now)
+        return resolved
     }
 
     private func embed(_ texts: [String], modelsRoot: URL, server: URL?) async -> [[Float]]? {
         let trimmed = texts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         guard !trimmed.isEmpty, trimmed.contains(where: { !$0.isEmpty }) else { return nil }
-        if let server, let id = await loadedLMStudioModel(server: server) {
-            return await lmStudioEmbeddings(texts: trimmed, model: id, server: server)
+        _ = await resolvedModelID(modelsRoot: modelsRoot, server: server)
+        if let server, let id = cachedProbe?.lmStudioModel {
+            if let result = await lmStudioEmbeddings(texts: trimmed, model: id, server: server) {
+                return result
+            }
+            // LM Studio went away: invalidate cache and fall back to MLX if present.
+            cachedProbe = nil
         }
         return await mlxEmbeddings(texts: trimmed, modelsRoot: modelsRoot)
     }
 
     private func loadedLMStudioModel(server: URL) async -> String? {
         var request = URLRequest(url: server.appendingPathComponent("api/v0/models"))
-        request.timeoutInterval = 2
+        request.timeoutInterval = 0.5
         guard let (data, _) = try? await probeSession.data(for: request) else { return nil }
         return OpenAICompatible.loadedEmbeddingModel(from: data)
     }
@@ -96,7 +143,7 @@ actor ChunkEmbeddingBackend {
         guard let folder = Self.discoverMLXModel(in: modelsRoot) else { return nil }
         do {
             let container = try await loadMLX(folder)
-            return try await container.perform { context -> [[Float]] in
+            let vectors = await container.perform { context -> [[Float]] in
                 var output: [[Float]] = []
                 output.reserveCapacity(texts.count)
                 for text in texts {
@@ -114,10 +161,10 @@ actor ChunkEmbeddingBackend {
                 Stream.defaultStream.synchronize()
                 return output
             }
+            scheduleIdleUnload()
+            return vectors
         } catch {
-            mlxContainer = nil
-            mlxDirectory = nil
-            mlxModelID = nil
+            unload()
             return nil
         }
     }

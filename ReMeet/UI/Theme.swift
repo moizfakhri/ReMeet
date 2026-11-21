@@ -23,6 +23,12 @@ enum Theme {
     static let recordingLabel = dynamic(\.recordingLabel)
 
     static let nsAccent = dynamicNS(\.accent)
+    static let nsFg = dynamicNS(\.fg)
+    static let nsFg2 = dynamicNS(\.fg2)
+    static let nsFg3 = dynamicNS(\.fg3)
+    static let nsSurface = dynamicNS(\.surface)
+    static let nsMark = dynamicNS(\.mark)
+    static let nsLine = dynamicNS(\.line)
 
     private static let light = Palette.light()
     private static let dark = Palette.dark()

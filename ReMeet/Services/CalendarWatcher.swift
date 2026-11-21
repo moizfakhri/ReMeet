@@ -44,9 +44,13 @@ final class CalendarWatcher {
         reload()
     }
 
+    private var reloadTask: Task<Void, Never>?
+
     func stop() {
         timer?.cancel()
         timer = nil
+        reloadTask?.cancel()
+        reloadTask = nil
         observers.forEach {
             NotificationCenter.default.removeObserver($0)
             NSWorkspace.shared.notificationCenter.removeObserver($0)
@@ -67,17 +71,31 @@ final class CalendarWatcher {
     }
 
     func reload() {
+        reloadTask?.cancel()
         if let source {
             events = source()
-        } else if Self.hasAccess {
-            let now = Date()
-            let predicate = store.predicateForEvents(withStart: now.addingTimeInterval(-3600),
-                                                     end: now.addingTimeInterval(24 * 3600), calendars: nil)
-            events = store.events(matching: predicate).map(Self.meeting)
-        } else {
-            events = []
+            schedule()
+            return
         }
-        schedule()
+        guard Self.hasAccess else {
+            events = []
+            schedule()
+            return
+        }
+        // EventKit fetches can take 50–300 ms; keep them off the main thread at launch and
+        // on background iCloud/Google calendar sync notifications.
+        let store = self.store
+        reloadTask = Task { [weak self] in
+            let fetched = await Task.detached(priority: .utility) { () -> [CalendarMeeting] in
+                let now = Date()
+                let predicate = store.predicateForEvents(withStart: now.addingTimeInterval(-3600),
+                                                         end: now.addingTimeInterval(24 * 3600), calendars: nil)
+                return store.events(matching: predicate).map(Self.meeting)
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            self.events = fetched
+            self.schedule()
+        }
     }
 
     private func schedule() {
@@ -100,7 +118,7 @@ final class CalendarWatcher {
         }
     }
 
-    private static func meeting(_ event: EKEvent) -> CalendarMeeting {
+    private nonisolated static func meeting(_ event: EKEvent) -> CalendarMeeting {
         let others = (event.attendees ?? []).filter { !$0.isCurrentUser }
         let me = event.attendees?.first { $0.isCurrentUser }
         let link = [event.url?.absoluteString, event.location, event.notes].compactMap { $0 }.joined(separator: "\n")
