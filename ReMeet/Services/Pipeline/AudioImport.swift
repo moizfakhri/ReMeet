@@ -10,6 +10,35 @@ enum AudioImport {
         var errorDescription: String? { message }
     }
 
+    /// Resolves the audio file's original creation date:
+    /// 1. Embedded container creation date (e.g. Voice Memos / QuickTime `.m4a` metadata),
+    ///    which survives AirDrop and cloud copies.
+    /// 2. Filesystem creation date (or content modification date if earlier, e.g. copied files
+    ///    whose APFS birth time was reset on transfer).
+    /// 3. Current date as a last resort.
+    static func creationDate(of source: URL) async -> Date {
+        let asset = AVURLAsset(url: source)
+        if let item = try? await asset.load(.creationDate),
+           let embedded = try? await item.load(.dateValue),
+           isReasonable(embedded) {
+            return embedded
+        }
+        let values = try? source.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+        let created = values?.creationDate.flatMap { isReasonable($0) ? $0 : nil }
+        let modified = values?.contentModificationDate.flatMap { isReasonable($0) ? $0 : nil }
+        if let created, let modified {
+            return min(created, modified)
+        }
+        return created ?? modified ?? Date()
+    }
+
+    private static func isReasonable(_ date: Date) -> Bool {
+        // Guard against bogus epoch-0 / 1904 QuickTime placeholder dates or far-future clocks.
+        let earliest = Date(timeIntervalSince1970: 946_684_800) // 2000-01-01
+        let latest = Date().addingTimeInterval(24 * 3600)
+        return date >= earliest && date <= latest
+    }
+
     /// Writes `system-16k.m4a` and `audio.m4a`. Returns the duration in seconds.
     static func convert(_ source: URL, into folder: MeetingFolder) throws -> Double {
         let input: AVAudioFile

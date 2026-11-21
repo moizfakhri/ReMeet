@@ -168,6 +168,20 @@ final class MeetingDocument {
         }
     }
 
+    func setStartTime(_ newStartTime: Date) {
+        guard meta.status != .recording, abs(newStartTime.timeIntervalSince(meta.startTime)) >= 1 else { return }
+        let duration = max(0, meta.effectiveDuration)
+        if let updated = try? folder.updateMeta({
+            $0.startTime = newStartTime
+            if $0.endTime != nil || duration > 0 {
+                $0.endTime = newStartTime.addingTimeInterval(duration)
+            }
+        }) {
+            meta = updated
+            writeSummaryMarkdown()
+        }
+    }
+
     func setActionItem(_ item: ActionItem, done: Bool) {
         guard var summary, let index = summary.actionItems.firstIndex(of: item) else { return }
         summary.actionItems[index].done = done

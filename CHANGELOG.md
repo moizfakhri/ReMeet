@@ -46,6 +46,8 @@ All performance numbers were measured on a **base Apple M4 MacBook Pro (16 GB un
   - **Document decode & display (off-main):** **17–20 ms**.
 
 ### UI / UX Redesign & Bug Fixes
+- **Audio import preserves original recording date (`AudioImport`, `AppModel`):** Importing an existing audio file now uses the file's original creation date (embedded container `.creationDate` metadata first—preserving Voice Memos / AirDropped `.m4a` dates—then filesystem creation/earlier modification date) for the meeting folder name, `meta.startTime`/`endTime`, sidebar date grouping, and AI Markdown export filename instead of the import timestamp.
+- **Editable meeting date & time (`MeetingDetailView`, `MeetingDocument`, `MeetingLibrary`):** Clicking a meeting's date/time in the header opens a calendar + time popover to adjust `startTime` (preserving duration and `endTime`), immediately re-sorting the sidebar, rewriting `summary.md`, updating the search index, and renaming/updating any auto-exported AI `.md` file.
 - Visually audited all views in Light and Dark mode via `--snapshots` renderer:
   - **Meeting Detail:** Reorganized into a clean 2-row header (Row 1: non-truncating date/time/duration/words + app pill; Row 2: pill chips for Folder, Call speakers, and Engine/Wording), placed **Summary**, **Action items** (with owner/due pills), and **Your notes** immediately above the fold, collapsed **Speakers** into a tidy disclosure card with an unnamed-speaker badge, and added a bottom fade gradient above the floating player.
   - **Chat bar:** Collapsed idle chat from a 150 pt card into a sleek 1-row expandable ask bar; removed `.defaultAction` Return hijack that conflicted with title/note editing.

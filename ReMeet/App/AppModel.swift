@@ -309,16 +309,19 @@ final class AppModel {
     }
 
     /// Copies an existing recording in as a meeting and runs diarize, transcribe, and summary.
+    /// Uses the audio file's creation date (embedded metadata or filesystem date) rather than the import time.
     func importMeetingAudio(from url: URL) {
         let access = url.startAccessingSecurityScopedResource()
         let title = url.deletingPathExtension().lastPathComponent
-        let folder = MeetingFolder.makeNew(in: library.root, start: Date(), title: title.isEmpty ? "Imported meeting" : title)
+        let root = library.root
         Task {
+            let recordedAt = await AudioImport.creationDate(of: url)
+            let folder = MeetingFolder.makeNew(in: root, start: recordedAt, title: title.isEmpty ? "Imported meeting" : title)
             do {
                 let seconds = try AudioImport.convert(url, into: folder)
                 if access { url.stopAccessingSecurityScopedResource() }
                 await MainActor.run {
-                    self.finishImport(folder, title: title, seconds: seconds, filename: url.lastPathComponent)
+                    self.finishImport(folder, title: title, startTime: recordedAt, seconds: seconds, filename: url.lastPathComponent)
                 }
             } catch {
                 if access { url.stopAccessingSecurityScopedResource() }
@@ -329,9 +332,9 @@ final class AppModel {
         }
     }
 
-    private func finishImport(_ folder: MeetingFolder, title: String, seconds: Double, filename: String) {
-        var meta = MeetingMeta(title: title.isEmpty ? MeetingMeta.defaultTitle : title, status: .compressed, startTime: Date())
-        meta.endTime = Date()
+    private func finishImport(_ folder: MeetingFolder, title: String, startTime: Date, seconds: Double, filename: String) {
+        var meta = MeetingMeta(title: title.isEmpty ? MeetingMeta.defaultTitle : title, status: .compressed, startTime: startTime)
+        meta.endTime = startTime.addingTimeInterval(seconds)
         meta.durationSeconds = seconds
         meta.events.append(SessionEvent(time: Date(), offsetSeconds: 0, type: "imported", detail: filename))
         do {

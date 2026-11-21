@@ -13,6 +13,9 @@ struct MeetingDetailView: View {
     @State private var title: String
     @State private var wordingStatus: String?
     @State private var wordingFailed = false
+    @State private var editingDate = false
+    @State private var draftDate = Date()
+    @State private var dateHovered = false
     @FocusState private var titleFocused: Bool
 
     init(document: MeetingDocument, player: PlayerModel, showTranscript: Binding<Bool>) {
@@ -109,6 +112,7 @@ struct MeetingDetailView: View {
             title = document.meta.title
             wordingStatus = nil
             wordingFailed = false
+            editingDate = false
         }
         .onChange(of: document.meta.title) { _, new in if !titleFocused { title = new } }
         .onChange(of: model.chatFocusPending) { _, _ in scrollToChatIfNeeded(proxy) }
@@ -132,9 +136,7 @@ struct MeetingDetailView: View {
 
             // Row 1: Pure meeting facts (never competes with interactive menus or truncates).
             HStack(spacing: 6) {
-                Text(document.meta.startTime.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day()))
-                Text("·").foregroundStyle(Theme.fg3)
-                Text(document.meta.startTime.formatted(date: .omitted, time: .shortened))
+                dateButton
                 if document.meta.effectiveDuration > 0 {
                     Text("·").foregroundStyle(Theme.fg3)
                     Text(TimeFormat.duration(document.meta.effectiveDuration))
@@ -190,6 +192,66 @@ struct MeetingDetailView: View {
         }
     }
 
+    private var dateButton: some View {
+        let canEdit = document.meta.status != .recording
+        let sameYear = Calendar.current.isDate(document.meta.startTime, equalTo: Date(), toGranularity: .year)
+        let dateText = sameYear
+            ? document.meta.startTime.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+            : document.meta.startTime.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().year())
+        return Button {
+            draftDate = document.meta.startTime
+            editingDate = true
+        } label: {
+            HStack(spacing: 6) {
+                Text(dateText)
+                Text("·").foregroundStyle(Theme.fg3)
+                Text(document.meta.startTime.formatted(date: .omitted, time: .shortened))
+            }
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background((dateHovered && canEdit) || editingDate ? Theme.bg : .clear, in: RoundedRectangle(cornerRadius: 5))
+            .overlay(RoundedRectangle(cornerRadius: 5).stroke((dateHovered && canEdit) || editingDate ? Theme.line : .clear))
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, -5)
+        .disabled(!canEdit)
+        .onHover { dateHovered = $0 }
+        .help(canEdit ? "Click to change meeting date and time" : "Recording in progress")
+        .popover(isPresented: $editingDate, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Meeting date & time")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.fg)
+                DatePicker("Date", selection: $draftDate, displayedComponents: .date)
+                    .datePickerStyle(.graphical)
+                    .labelsHidden()
+                HStack {
+                    Text("Time")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(Theme.fg2)
+                    Spacer()
+                    DatePicker("Time", selection: $draftDate, displayedComponents: .hourAndMinute)
+                        .labelsHidden()
+                }
+                HStack(spacing: 8) {
+                    Spacer()
+                    Button("Cancel") { editingDate = false }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    Button("Save") {
+                        commitStartTime(draftDate)
+                        editingDate = false
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .keyboardShortcut(.defaultAction)
+                }
+            }
+            .padding(14)
+            .frame(width: 260)
+        }
+    }
+
     private var folderMenu: some View {
         let current = model.library.collection(document.meta.collectionID)
         return Menu {
@@ -211,7 +273,8 @@ struct MeetingDetailView: View {
             if let exported = document.meta.exportedMarkdownPath, !exported.isEmpty {
                 Divider()
                 Button("Reveal Exported .md") {
-                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: exported)])
+                    let fresh = (try? document.folder.readMeta())?.exportedMarkdownPath ?? exported
+                    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: fresh)])
                 }
             }
         } label: {
@@ -367,6 +430,14 @@ struct MeetingDetailView: View {
         let before = document.meta.title
         document.rename(title)
         guard document.meta.title != before else { return }
+        model.library.refresh(document.folder)
+        model.documentEdited(document, reindexSearch: true)
+    }
+
+    private func commitStartTime(_ newDate: Date) {
+        let before = document.meta.startTime
+        document.setStartTime(newDate)
+        guard document.meta.startTime != before else { return }
         model.library.refresh(document.folder)
         model.documentEdited(document, reindexSearch: true)
     }

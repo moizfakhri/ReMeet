@@ -150,7 +150,7 @@ final class MeetingLibrary {
         items.first { $0.folder == folder }
     }
 
-    /// Re-reads one meeting's meta.json (after a pipeline step) without rescanning everything.
+    /// Re-reads one meeting's meta.json (after a pipeline step or edit) without rescanning everything.
     func refresh(_ folder: MeetingFolder) {
         // One small meta.json: cheap enough to read here (<1 ms).
         guard let meta = try? folder.readMeta() else {
@@ -158,7 +158,11 @@ final class MeetingLibrary {
             return
         }
         if let index = items.firstIndex(where: { $0.folder == folder }) {
+            let dateChanged = items[index].meta.startTime != meta.startTime
             items[index].meta = meta
+            if dateChanged {
+                items.sort { $0.meta.startTime > $1.meta.startTime }
+            }
         } else {
             reload()
         }
