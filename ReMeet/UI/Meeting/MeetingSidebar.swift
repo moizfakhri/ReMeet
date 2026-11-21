@@ -22,52 +22,96 @@ struct MeetingSidebar: View {
         // Selection is drawn as the Fern "mark" (soft accent tint, accent title, readable meta
         // line) instead of the system highlight, whose white text on the dark-mode green was
         // 2.2:1. Arrow keys still move the selection.
-        List {
-            folderSection
-            if model.recorder.isRecording {
-                LiveRow()
-                    .padding(.vertical, 5)
-                    .padding(.horizontal, 10)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .onTapGesture { select(.live) }
-                    .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
-            }
-            ForEach(groups, id: \.0) { group, items in
-                let list = shown(items, limit: SidebarList.groupLimit, id: group.rawValue)
-                Section {
-                    ForEach(list.rows) { item in
-                        meetingRow(item, isTodayGroup: group == .today)
-                            // Dropping on the list outside the folders takes a recording out.
-                            .dropDestination(for: String.self) { drops, _ in
-                                drop(drops, intoFolder: nil)
-                            } isTargeted: { dropTarget = $0 ? item.id : (dropTarget == item.id ? nil : dropTarget) }
+        // Stack the List above the footer in a VStack rather than `.safeAreaInset(edge: .bottom)`
+        // so scrolled rows clip cleanly at the Divider and never bleed through Import / Settings
+        // in macOS's Liquid Glass sidebar.
+        VStack(spacing: 0) {
+            List {
+                folderSection
+                if model.recorder.isRecording {
+                    LiveRow()
+                        .padding(.vertical, 5)
+                        .padding(.horizontal, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                        .onTapGesture { select(.live) }
+                        .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+                }
+                ForEach(groups, id: \.0) { group, items in
+                    let list = shown(items, limit: SidebarList.groupLimit, id: group.rawValue)
+                    Section {
+                        ForEach(list.rows) { item in
+                            meetingRow(item, isTodayGroup: group == .today)
+                                // Dropping on the list outside the folders takes a recording out.
+                                .dropDestination(for: String.self) { drops, _ in
+                                    drop(drops, intoFolder: nil)
+                                } isTargeted: { dropTarget = $0 ? item.id : (dropTarget == item.id ? nil : dropTarget) }
+                        }
+                        showMoreRow(id: group.rawValue, hidden: list.hidden, total: items.count, limit: SidebarList.groupLimit)
+                    } header: {
+                        Text(group.rawValue)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.fg3)
+                            .textCase(nil)
                     }
-                    showMoreRow(id: group.rawValue, hidden: list.hidden, total: items.count, limit: SidebarList.groupLimit)
-                } header: {
-                    Text(group.rawValue)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Theme.fg3)
-                        .textCase(nil)
+                }
+                if groups.isEmpty, search.isEmpty, hasFiledMeetings {
+                    // Everything is in folders: still somewhere to drag a recording out to.
+                    Text("Drag a recording here to take it out of its folder.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.fg2)
+                        .sidebarRow(selected: dropTarget == "unfiled") {}
+                        .dropDestination(for: String.self) { drops, _ in
+                            drop(drops, intoFolder: nil)
+                        } isTargeted: { dropTarget = $0 ? "unfiled" : (dropTarget == "unfiled" ? nil : dropTarget) }
                 }
             }
-            if groups.isEmpty, search.isEmpty, hasFiledMeetings {
-                // Everything is in folders: still somewhere to drag a recording out to.
-                Text("Drag a recording here to take it out of its folder.")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(Theme.fg2)
-                    .sidebarRow(selected: dropTarget == "unfiled") {}
-                    .dropDestination(for: String.self) { drops, _ in
-                        drop(drops, intoFolder: nil)
-                    } isTargeted: { dropTarget = $0 ? "unfiled" : (dropTarget == "unfiled" ? nil : dropTarget) }
+            .listStyle(.sidebar)
+            .transaction { $0.disablesAnimations = true }
+            .focusable()
+            .focusEffectDisabled()
+            .onKeyPress(.downArrow) { move(1) }
+            .onKeyPress(.upArrow) { move(-1) }
+            .overlay {
+                if !search.isEmpty && groups.isEmpty {
+                    ContentUnavailableView.search(text: search)
+                }
             }
+
+            Theme.line.frame(height: 1)
+            HStack(spacing: 12) {
+                Button {
+                    model.importMeetingAudioChosen()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "square.and.arrow.down")
+                            .font(.system(size: 12))
+                        Text("Import")
+                    }
+                    .foregroundStyle(Theme.fg2)
+                    .hitTarget(6)
+                }
+                .buttonStyle(.plain)
+                .help("Import an existing audio recording to transcribe and summarize")
+                Spacer()
+                Button {
+                    model.openSettings()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "gearshape")
+                            .font(.system(size: 12))
+                        Text("Settings")
+                    }
+                    .foregroundStyle(Theme.fg2)
+                    .hitTarget(6)
+                }
+                .buttonStyle(.plain)
+                .help("Settings (⌘,)")
+            }
+            .font(.system(size: 12.5))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
         }
-        .listStyle(.sidebar)
-        .transaction { $0.disablesAnimations = true }
-        .focusable()
-        .focusEffectDisabled()
-        .onKeyPress(.downArrow) { move(1) }
-        .onKeyPress(.upArrow) { move(-1) }
         // A meeting opened from elsewhere (menu bar, notification) shows inside its folder.
         .onChange(of: selection) { _, next in
             guard case .meeting(let folder) = next,
@@ -79,48 +123,6 @@ struct MeetingSidebar: View {
             try? await Task.sleep(for: .milliseconds(search.isEmpty ? 0 : 150))
             guard !Task.isCancelled else { return }
             await model.runSearch(search)
-        }
-        .overlay {
-            if !search.isEmpty && groups.isEmpty {
-                ContentUnavailableView.search(text: search)
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
-            VStack(spacing: 0) {
-                Divider()
-                HStack(spacing: 12) {
-                    Button {
-                        model.importMeetingAudioChosen()
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "square.and.arrow.down")
-                                .font(.system(size: 12))
-                            Text("Import")
-                        }
-                        .foregroundStyle(Theme.fg2)
-                        .hitTarget(6)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Import an existing audio recording to transcribe and summarize")
-                    Spacer()
-                    Button {
-                        model.openSettings()
-                    } label: {
-                        HStack(spacing: 5) {
-                            Image(systemName: "gearshape")
-                                .font(.system(size: 12))
-                            Text("Settings")
-                        }
-                        .foregroundStyle(Theme.fg2)
-                        .hitTarget(6)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Settings (⌘,)")
-                }
-                .font(.system(size: 12.5))
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-            }
         }
         .alert("Rename meeting", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
             TextField("Title", text: $renameText)
@@ -645,6 +647,7 @@ private struct FolderEditorSheet: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.glassProminent)
+                .tint(Theme.accentFill)
                 .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }

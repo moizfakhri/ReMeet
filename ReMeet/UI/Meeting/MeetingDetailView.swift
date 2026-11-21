@@ -82,18 +82,21 @@ struct MeetingDetailView: View {
             .frame(maxWidth: 640, alignment: .leading)
             .padding(.horizontal, 40)
             .padding(.top, 26)
-            .padding(.bottom, 128)
+            .padding(.bottom, 132)
             .frame(maxWidth: .infinity)
         }
         .background(Theme.surface)
         .overlay(alignment: .bottom) {
+            // Solid Theme.surface covers the full height of PlayerCapsule (+ 12 pt above it)
+            // so scrolled content fades cleanly before reaching the capsule and never refracts
+            // or collides through Liquid Glass.
             VStack(spacing: 0) {
-                LinearGradient(colors: [Theme.surface.opacity(0), Theme.surface.opacity(0.92), Theme.surface],
+                LinearGradient(colors: [Theme.surface.opacity(0), Theme.surface],
                                startPoint: .top, endPoint: .bottom)
-                    .frame(height: 36)
+                    .frame(height: 28)
                     .allowsHitTesting(false)
                 Theme.surface
-                    .frame(height: 54)
+                    .frame(height: 76)
                     .allowsHitTesting(false)
             }
             .overlay(alignment: .bottom) {
@@ -243,6 +246,7 @@ struct MeetingDetailView: View {
                         editingDate = false
                     }
                     .buttonStyle(.borderedProminent)
+                    .tint(Theme.accentFill)
                     .controlSize(.small)
                     .keyboardShortcut(.defaultAction)
                 }
@@ -616,6 +620,7 @@ private struct NotesSection: View {
                         model.regenerateSummary(document.folder, backend: model.summaryBackend)
                     }
                     .buttonStyle(.glassProminent)
+                    .tint(Theme.accentFill)
                 }
                 .padding(10)
                 .background(Theme.mark, in: RoundedRectangle(cornerRadius: 10))
