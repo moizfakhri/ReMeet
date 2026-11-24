@@ -60,23 +60,84 @@ private struct GlassPlate: View, Equatable {
     }
 }
 
+/// Stacked micro-bars on the collapsed pill: top row = `You` (mic), bottom row = `Call` (others),
+/// so neither track can mask silence on the other.
+private struct DualPillMeters: View {
+    var micLevel: Float
+    var callLevel: Float
+    var hasIssue: Bool
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            barRow(level: micLevel, count: 7)
+            barRow(level: callLevel, count: 7)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Mic and call audio levels")
+        .accessibilityValue("Mic \(Int(micLevel * 100)) percent, Call \(Int(callLevel * 100)) percent")
+        .onAppear { model.recorder.visibleLevelMeters += 1 }
+        .onDisappear { model.recorder.visibleLevelMeters = max(0, model.recorder.visibleLevelMeters - 1) }
+    }
+
+    private func barRow(level: Float, count: Int) -> some View {
+        HStack(spacing: 2) {
+            ForEach(0..<count, id: \.self) { index in
+                let lit = Float(index) < level * Float(count)
+                Capsule()
+                    .fill(lit ? Theme.accent : (hasIssue ? Color.orange.opacity(0.32) : Theme.line))
+                    .frame(width: 4, height: 5)
+            }
+        }
+    }
+}
+
 private struct Pill: View {
     let controller: BubbleController
     @Environment(AppModel.self) private var model
 
     var body: some View {
         let recorder = model.recorder
-        HStack(spacing: 10) {
-            HStack(spacing: 10) {
-                LevelBars(level: max(recorder.micLevel, recorder.systemLevel), count: 7)
-                    .frame(width: 42, height: 14)
+        HStack(spacing: 8) {
+            HStack(spacing: 9) {
+                DualPillMeters(
+                    micLevel: recorder.micLevel,
+                    callLevel: recorder.systemLevel,
+                    hasIssue: recorder.activeAudioIssue != nil
+                )
+                .frame(width: 42, height: 14)
+
                 Text(TimeFormat.timer(recorder.elapsed))
                     .font(.system(size: 13, weight: .medium, design: .monospaced))
                     .monospacedDigit()
                     .foregroundStyle(Theme.fg)
                     .lineLimit(1)
                     .fixedSize()
-                if !recorder.notes.isEmpty {
+
+                if let flash = controller.state.pinnedConfirmation {
+                    Text(flash)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                        .lineLimit(1)
+                } else if let toast = recorder.deviceSwitchToast {
+                    HStack(spacing: 3.5) {
+                        Image(systemName: recorder.isBluetoothInput ? "airpodspro" : "mic.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(toast)
+                            .font(.system(size: 11, weight: .semibold))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(Theme.accent)
+                } else if let issue = recorder.activeAudioIssue {
+                    HStack(spacing: 3.5) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                        Text(issue.pillLabel)
+                            .font(.system(size: 11, weight: .semibold))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(.orange)
+                } else if !recorder.notes.isEmpty {
                     Text("\(recorder.notes.count) note\(recorder.notes.count == 1 ? "" : "s")")
                         .font(.system(size: 11.5))
                         .foregroundStyle(Theme.fg2)
@@ -86,6 +147,15 @@ private struct Pill: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .onTapGesture { controller.openNoteField() }
+            Button(action: controller.pinMoment) {
+                Image(systemName: controller.state.pinnedConfirmation != nil ? "pin.fill" : "pin")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(controller.state.pinnedConfirmation != nil ? Theme.accent : Theme.fg2)
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.plain)
+            .help("Mark this moment (\(KeyboardShortcuts.Name.markMoment.hint))")
+            .accessibilityLabel("Mark this moment")
             Button(action: controller.hidePill) {
                 Image(systemName: "eye.slash")
                     .font(.system(size: 11, weight: .semibold))
@@ -191,6 +261,15 @@ private struct NoteField: View {
                 .buttonStyle(.plain)
                 .help("Stop recording (\(KeyboardShortcuts.Name.toggleRecording.hint))")
                 .accessibilityLabel("Stop recording")
+            }
+
+            if let issue = model.recorder.activeAudioIssue {
+                LiveAudioIssueBanner(
+                    issue: issue,
+                    compact: true,
+                    onAction: { model.recorder.performAudioIssueAction($0) },
+                    onDismiss: { model.recorder.dismissAudioIssue(issue.kind) }
+                )
             }
 
             TextField("Type a note, or press Return for a bookmark", text: $state.draft, axis: .vertical)

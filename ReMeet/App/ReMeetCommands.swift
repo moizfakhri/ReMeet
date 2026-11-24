@@ -37,6 +37,8 @@ struct ReMeetCommands: Commands {
             }
             Button("Add Note" + hint(.addNote)) { model.addNoteShortcut() }
                 .disabled(!model.recorder.isRecording)
+            Button("Mark Moment" + hint(.markMoment)) { model.markMomentShortcut() }
+                .disabled(!model.recorder.isRecording)
             Divider()
             Button("Open Meetings") { model.openMeetings() }
                 .keyboardShortcut("o", modifiers: .command)
@@ -101,6 +103,15 @@ struct ReMeetCommands: Commands {
         }
 
         CommandGroup(before: .sidebar) {
+            Button("Meetings") { model.switchTab(.meetings) }
+                .keyboardShortcut("1", modifiers: .command)
+            Button("Schedule") { model.switchTab(.schedule) }
+                .keyboardShortcut("2", modifiers: .command)
+            Button("People") { model.switchTab(.people) }
+                .keyboardShortcut("3", modifiers: .command)
+            Button("Moments") { model.switchTab(.moments) }
+                .keyboardShortcut("4", modifiers: .command)
+            Divider()
             Button(focus?.showTranscript.wrappedValue == true ? "Hide Transcript" : "Show Transcript") {
                 focus?.showTranscript.wrappedValue.toggle()
             }

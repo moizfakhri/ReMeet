@@ -10,10 +10,29 @@ import UniformTypeIdentifiers
 extension KeyboardShortcuts.Name {
     static let toggleRecording = Self("toggleRecording", default: .init(.r, modifiers: [.option, .command]))
     static let addNote = Self("addNote", default: .init(.n, modifiers: [.option, .command]))
+    static let markMoment = Self("markMoment", default: .init(.m, modifiers: [.option, .command]))
     static let toggleBubble = Self("toggleBubble", default: .init(.h, modifiers: [.option, .command]))
 
     /// The shortcut as the user set it ("⌥⌘R"), or "" if they removed it (audit L1).
     var hint: String { KeyboardShortcuts.getShortcut(for: self)?.description ?? "" }
+}
+
+/// Top-level sections in the main ReMeet window.
+enum WorkspaceTab: String, CaseIterable, Identifiable, Hashable {
+    case meetings = "Meetings"
+    case schedule = "Schedule"
+    case people = "People"
+    case moments = "Moments"
+
+    var id: String { rawValue }
+    var symbol: String {
+        switch self {
+        case .meetings: "waveform"
+        case .schedule: "calendar"
+        case .people: "person.2"
+        case .moments: "sparkles.rectangle.stack"
+        }
+    }
 }
 
 /// UserDefaults keys shared by Settings and the services.
@@ -49,6 +68,7 @@ final class AppModel {
     let library: MeetingLibrary
     let queue = ProcessingQueue()
     let models = ModelManager()
+    let hub = HubCoordinator()
     @ObservationIgnored private(set) lazy var notifier = Notifier()
     @ObservationIgnored private let processMonitor = AudioProcessMonitor()
     @ObservationIgnored private var detector = MeetingDetector()
@@ -89,6 +109,11 @@ final class AppModel {
     var chatFocusPending = false
     /// The meeting the meeting window should show next (menu bar "recent" click, notification).
     var selectedMeeting: MeetingFolder?
+    /// Cross-tab navigation requests (e.g. clicking a speaker pill to open them in People, or Up Next in Schedule).
+    var requestedTab: WorkspaceTab?
+    var requestedSettingsPane: SettingsRoot.Pane?
+    var selectedPersonID: String?
+    var selectedCalendarEventID: String?
 
     @ObservationIgnored private var openWindowAction: OpenWindowAction?
     @ObservationIgnored private var openSettingsAction: OpenSettingsAction?
@@ -121,6 +146,18 @@ final class AppModel {
         library = MeetingLibrary(root: MeetingFolder.defaultRoot)
         library.root = meetingsRoot
         recorder.meetingsRoot = meetingsRoot
+        hub.configure(root: meetingsRoot)
+        calendar.storageRoot = meetingsRoot
+        hub.onMeetingMutated = { [weak self] folder in
+            guard let self else { return }
+            self.library.refresh(folder)
+            self.reindex(folder)
+            self.exportMarkdown(for: folder)
+        }
+        calendar.onEventsUpdated = { [weak self] events in
+            guard let self else { return }
+            self.hub.updateCalendarEvents(events, items: self.library.items, recorderName: Self.recorderName)
+        }
         recorder.onFinished = { [weak self] folder in
             self?.callEndFinished()
             self?.bubble.recordingStopped()
@@ -130,6 +167,9 @@ final class AppModel {
         }
         // Save a half-typed bubble note before the session closes (audit C3).
         recorder.onWillStop = { [weak self] in self?.bubble.recordingStopped() }
+        recorder.onScopeSwitchedToAllApps = {
+            UserDefaults.standard.set(RecordingScope.allApps.rawValue, forKey: SettingsKey.recordingScope)
+        }
         recorder.onDiscarded = { [weak self] in
             self?.callEndFinished()
             self?.bubble.recordingStopped()
@@ -153,8 +193,10 @@ final class AppModel {
 
     func launch(openWindowOnLaunch: Bool = false) {
         library.onEdited = { [weak self] folder in
-            self?.reindex(folder)
-            self?.exportMarkdown(for: folder)
+            guard let self else { return }
+            self.reindex(folder)
+            self.exportMarkdown(for: folder)
+            self.hub.refreshMeeting(folder, recorderName: Self.recorderName)
         }
         library.onCollectionExportChanged = { [weak self] collection in
             self?.syncCollectionExports(collection)
@@ -164,7 +206,9 @@ final class AppModel {
             self?.library.refresh(folder)
         }
         queue.onContentChange = { [weak self] folder in
-            self?.reindex(folder)
+            guard let self else { return }
+            self.reindex(folder)
+            self.hub.refreshMeeting(folder, recorderName: Self.recorderName)
         }
         models.onReady = { [weak self] id in
             self?.queue.retryWaiting()
@@ -172,10 +216,12 @@ final class AppModel {
         installSpeechStages()
         queue.runners[.summarize] = summarizeRunner()
         queue.onFinished = { [weak self] folder, meta in
-            self?.unseenReady.insert(folder)
-            self?.cleanOldAudio()
-            self?.exportMarkdown(for: folder)
-            self?.notifier.summaryReady(folder, meta: meta)
+            guard let self else { return }
+            self.unseenReady.insert(folder)
+            self.cleanOldAudio()
+            self.exportMarkdown(for: folder)
+            self.hub.refreshMeeting(folder, recorderName: Self.recorderName)
+            self.notifier.summaryReady(folder, meta: meta)
         }
         queue.onFailed = { [weak self] folder, failure in self?.notifier.failed(folder, failure: failure) }
         queue.onTranscribed = { [weak self] folder, meta in self?.notifier.transcriptReady(folder, meta: meta) }
@@ -187,6 +233,7 @@ final class AppModel {
             guard let self else { return }
             Perf.mark("library.loaded")
             self.queue.enqueuePending(in: self.library)
+            self.hub.reloadAll(items: self.library.items, calendarEvents: self.calendar.events, recorderName: Self.recorderName)
         }
         syncSearchIndex()
         cleanOldAudio()
@@ -205,6 +252,9 @@ final class AppModel {
         }
         KeyboardShortcuts.onKeyUp(for: .addNote) { [weak self] in
             self?.addNoteShortcut()
+        }
+        KeyboardShortcuts.onKeyUp(for: .markMoment) { [weak self] in
+            self?.markMomentShortcut()
         }
         KeyboardShortcuts.onKeyUp(for: .toggleBubble) { [weak self] in
             self?.toggleBubbleShortcut()
@@ -388,12 +438,14 @@ final class AppModel {
     func notesEdited(_ document: MeetingDocument) {
         reindex(document.folder)
         exportMarkdown(for: document.folder)
+        hub.refreshMeeting(document.folder, recorderName: Self.recorderName)
     }
 
     /// Action item toggled or speaker edited in the meeting window: sync AI export if configured.
     func documentEdited(_ document: MeetingDocument, reindexSearch: Bool = false) {
         if reindexSearch { reindex(document.folder) }
         exportMarkdown(for: document.folder)
+        hub.refreshMeeting(document.folder, recorderName: Self.recorderName)
     }
 
     /// Auto-exports a meeting to its ReMeet folder's configured local directory (if any), off main.
@@ -456,6 +508,7 @@ final class AppModel {
         queue.remove(folder)
         removeFromSearchIndex(folder)
         removeFromChunkIndex(folder)
+        hub.removeMeeting(folder, recorderName: Self.recorderName)
     }
 
     /// True when notes.json is newer than summary.json (offer to regenerate).
@@ -615,16 +668,20 @@ final class AppModel {
         queue.resetForStorageChange()
         recorder.meetingsRoot = meetingsRoot
         library.root = meetingsRoot
+        hub.configure(root: meetingsRoot)
+        calendar.storageRoot = meetingsRoot
         library.reload { [weak self] in
             guard let self else { return }
             self.queue.enqueuePending(in: self.library)
+            self.hub.reloadAll(items: self.library.items, calendarEvents: self.calendar.events, recorderName: Self.recorderName)
         }
         _searchIndex = nil
         _chunkIndex = nil
         syncSearchIndex()
     }
 
-    func openSettings() {
+    func openSettings(pane: SettingsRoot.Pane? = nil) {
+        if let pane { requestedSettingsPane = pane }
         openSettingsAction?()
         NSApp.activate()
     }
@@ -651,45 +708,64 @@ final class AppModel {
         }
     }
 
-    /// `event`: the calendar meeting this recording is for; it names the recording.
+    /// `event`: the calendar meeting this recording is for; it names the recording and links attendees.
     func startRecording(for app: MeetingApp?, event: CalendarMeeting? = nil) {
         prompt.hide()
-        if let event {
-            if deferredReminder?.id == event.id { deferredReminder = nil }
-            calendar.markReminded(event.id)
+        let resolvedEvent = event ?? calendar.eventForCall()
+        if let resolvedEvent {
+            if deferredReminder?.id == resolvedEvent.id { deferredReminder = nil }
+            calendar.markReminded(resolvedEvent.id)
         }
         let scope = RecordingScope(rawValue: UserDefaults.standard.string(forKey: SettingsKey.recordingScope) ?? "") ?? .allApps
         recorder.meetingProcessFilter = scope == .meetingApps ? { Self.meetingProcessObjects() } : nil
         lastMeetingProcesses = scope == .meetingApps ? Self.meetingProcessObjects() : []
         callEndApp = app?.bundleID
-        let eventTitle = event.map(\.title).flatMap { $0.isEmpty ? nil : $0 }
-        recorder.start(title: eventTitle ?? app?.meetingTitle, titleIsFinal: eventTitle != nil, sourceApp: app?.bundleID)
+        let eventTitle = resolvedEvent.map(\.title).flatMap { $0.isEmpty ? nil : $0 }
+        recorder.start(title: eventTitle ?? app?.meetingTitle,
+                       titleIsFinal: eventTitle != nil,
+                       sourceApp: app?.bundleID,
+                       calendarEvent: resolvedEvent)
     }
 
-    // MARK: - Calendar reminders
+    /// Opens the meeting's video link (Google Meet, Zoom, Teams, etc.) and starts recording immediately.
+    func joinAndRecord(_ event: CalendarMeeting) {
+        if let url = event.joinURL {
+            NSWorkspace.shared.open(url)
+        }
+        if !recorder.isRecording {
+            startRecording(for: activeMeetingApp, event: event)
+        }
+    }
+
+    // MARK: - Calendar reminders & Schedule sync
 
     let calendar = CalendarWatcher()
     @ObservationIgnored private var deferredReminder: CalendarMeeting?
     @ObservationIgnored private var dismissedEvents: Set<String> = []
 
-    /// Settings > Recording toggle, or launch with it on: watch the calendar if allowed.
+    /// Settings > Recording toggle, or launch: keeps calendar schedule & ICS feeds synced, and
+    /// schedules 1-minute popups when `remindBeforeCalendarMeetings` is on.
     func calendarRemindersChanged() {
-        guard UserDefaults.standard.bool(forKey: SettingsKey.remindBeforeCalendarMeetings) else {
+        let remindersOn = UserDefaults.standard.bool(forKey: SettingsKey.remindBeforeCalendarMeetings)
+        if !remindersOn {
             deferredReminder = nil
-            calendar.stop()
-            return
         }
-        // On by default: the first launch with it on asks for Calendar
-        // access once; macOS remembers the answer, and a "no" just leaves reminders off.
+        let hasICSFeeds = !calendar.icsFeeds.isEmpty
         if !CalendarWatcher.hasAccess, calendar.source == nil {
-            guard CalendarWatcher.notDetermined else { return calendar.stop() }
-            Task {
-                if await calendar.requestAccess() { calendarRemindersChanged() }
+            if remindersOn, CalendarWatcher.notDetermined {
+                Task {
+                    if await calendar.requestAccess() { calendarRemindersChanged() }
+                }
+                if !hasICSFeeds { return }
+            } else if !hasICSFeeds {
+                calendar.stop()
+                return
             }
-            return
         }
         calendar.onReminder = { [weak self] event in
-            guard let self, !self.dismissedEvents.contains(event.id) else { return }
+            guard let self,
+                  UserDefaults.standard.bool(forKey: SettingsKey.remindBeforeCalendarMeetings),
+                  !self.dismissedEvents.contains(event.id) else { return }
             if self.recorder.isRecording || self.recorder.isBusy {
                 self.deferredReminder = event
                 return
@@ -726,13 +802,19 @@ final class AppModel {
         processMonitor.onProcessListChange = { [weak self] in
             MainActor.assumeIsolated { self?.audioProcessesChanged() }
         }
+        processMonitor.onInputDeviceActivity = { [weak self] in
+            MainActor.assumeIsolated { self?.recorder.checkCallAppMicFollow() }
+        }
         processMonitor.start()
     }
 
     func meetingAppsUsingMic(_ inputs: Set<String>) {
         micInputs = inputs
         activeMeetingApp = inputs.compactMap(MeetingApp.match).first
-        if recorder.isRecording { callEndInputsChanged(inputs) }
+        if recorder.isRecording {
+            callEndInputsChanged(inputs)
+            recorder.checkCallAppMicFollow()
+        }
         let ask = detector.update(inputProcesses: inputs, isRecording: recorder.isRecording)
         if let app = prompt.app, !detector.isActive(app) { prompt.hide() }
         guard let ask, UserDefaults.standard.bool(forKey: SettingsKey.askWhenMeetingStarts) else { return }
@@ -1079,6 +1161,10 @@ final class AppModel {
         bubble.openNoteField()
     }
 
+    func markMomentShortcut() {
+        bubble.pinMoment()
+    }
+
     func toggleBubbleShortcut() {
         guard recorder.isRecording else { return }
         bubble.togglePillVisibility()
@@ -1087,6 +1173,64 @@ final class AppModel {
     func recordingFinished(_ folder: MeetingFolder) {
         queue.resume()
         queue.enqueue(folder)
+        hub.refreshMeeting(folder, recorderName: Self.recorderName)
+    }
+
+    // MARK: - Workspace Navigation & Cross-Meeting Commitments
+
+    func switchTab(_ tab: WorkspaceTab) {
+        requestedTab = tab
+        openMeetings()
+    }
+
+    func openPerson(named name: String) {
+        if let match = hub.people.first(where: { $0.profile.matchesName(name) }) {
+            selectedPersonID = match.id
+        } else if let created = hub.createPerson(name: name, email: nil, role: nil, organization: nil, notes: "", recorderName: Self.recorderName) {
+            selectedPersonID = created.id
+        }
+        requestedTab = .people
+        openMeetings()
+    }
+
+    func openSchedule(selecting eventID: String? = nil) {
+        if let eventID { selectedCalendarEventID = eventID }
+        requestedTab = .schedule
+        openMeetings()
+    }
+
+    /// Toggles an action item from the Schedule, People, or Commitments view, updating `summary.json` & exports.
+    func toggleCommitment(_ item: CommitmentItem, done: Bool) {
+        mutateCommitment(item) { $0.done = done }
+    }
+
+    /// Hides an irrelevant action item from Commitments & its meeting summary.
+    func dismissCommitment(_ item: CommitmentItem) {
+        mutateCommitment(item) { $0.dismissed = true }
+    }
+
+    /// Explicitly marks whether another person's action item relates to or blocks you.
+    func setCommitmentRelevance(_ item: CommitmentItem, relatesToMe: Bool) {
+        mutateCommitment(item) { $0.relatesToMe = relatesToMe }
+    }
+
+    private func mutateCommitment(_ item: CommitmentItem, mutation: @Sendable @escaping (inout ActionItem) -> Void) {
+        let folder = item.meetingFolder
+        let target = item.actionItem
+        Task {
+            let changed = await Task.detached(priority: .userInitiated) { () -> Bool in
+                guard var summary = (try? folder.read(MeetingSummary.self, .summary)) ?? nil,
+                      let index = summary.actionItems.firstIndex(of: target) else { return false }
+                mutation(&summary.actionItems[index])
+                try? folder.write(summary, .summary)
+                folder.rewriteMarkdown()
+                return true
+            }.value
+            guard changed else { return }
+            self.library.refresh(folder)
+            self.exportMarkdown(for: folder)
+            self.hub.refreshMeeting(folder, recorderName: Self.recorderName)
+        }
     }
 }
 

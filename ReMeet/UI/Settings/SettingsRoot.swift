@@ -12,6 +12,7 @@ struct SettingsRoot: View {
     enum Pane: String, CaseIterable, Identifiable {
         case general = "General"
         case recording = "Recording"
+        case calendar = "Calendar"
         case transcription = "Transcription"
         case summaries = "Summaries"
         case permissions = "Permissions"
@@ -21,6 +22,7 @@ struct SettingsRoot: View {
             switch self {
             case .general: "gearshape"
             case .recording: "record.circle"
+            case .calendar: "calendar"
             case .transcription: "text.quote"
             case .summaries: "sparkles.rectangle.stack"
             case .permissions: "lock.shield"
@@ -28,6 +30,7 @@ struct SettingsRoot: View {
         }
     }
 
+    @Environment(AppModel.self) private var model
     @State private var pane: Pane?
 
     init(initialPane: Pane = .general) {
@@ -59,6 +62,7 @@ struct SettingsRoot: View {
                 switch pane ?? .general {
                 case .general: GeneralPane()
                 case .recording: RecordingPane()
+                case .calendar: CalendarPane()
                 case .transcription: TranscriptionPane()
                 case .summaries: SummariesPane()
                 case .permissions: PermissionsPane()
@@ -71,7 +75,19 @@ struct SettingsRoot: View {
                minHeight: 460, idealHeight: 540, maxHeight: .infinity)
         .background { WindowChrome(minSize: CGSize(width: 680, height: 460)) }
         .background { FollowPointerScreen() }
-        .onAppear { DockPresence.show("settings") }
+        .onAppear {
+            DockPresence.show("settings")
+            if let requested = model.requestedSettingsPane {
+                pane = requested
+                model.requestedSettingsPane = nil
+            }
+        }
+        .onChange(of: model.requestedSettingsPane) { _, requested in
+            if let requested {
+                pane = requested
+                model.requestedSettingsPane = nil
+            }
+        }
         .onDisappear { DockPresence.hide("settings") }
     }
 }
@@ -100,6 +116,7 @@ private struct GeneralPane: View {
             Section("Shortcuts") {
                 KeyboardShortcuts.Recorder("Start or stop recording", name: .toggleRecording)
                 KeyboardShortcuts.Recorder("Add a note", name: .addNote)
+                KeyboardShortcuts.Recorder("Mark a moment", name: .markMoment)
                 KeyboardShortcuts.Recorder("Hide or show recording pill", name: .toggleBubble)
             }
             Section("Note bubble") {
@@ -212,9 +229,131 @@ private struct RecordingPane: View {
                 Text("When the meeting app lets go of the mic for 30 seconds, the pill counts down from 10 seconds with a Keep recording button, then stops.")
                     .font(.caption).foregroundStyle(Theme.fg2)
             }
-            Section {
-                Text("ReMeet always follows your Mac's current input and output devices and never switches them, so AirPods stay in whatever mode the call put them in.")
+            Section("Audio Guardian & AirPods") {
+                Text("ReMeet automatically follows your active call microphone—including mid-call switches to AirPods or headsets selected inside Zoom, Meet, or Teams—and warns you right away if either your mic or call audio is muted or silent.")
                     .font(.callout).foregroundStyle(Theme.fg2)
+            }
+        }
+    }
+}
+
+// MARK: - Calendar & ICS Automation
+
+private struct CalendarPane: View {
+    @Environment(AppModel.self) private var model
+    @AppStorage(SettingsKey.remindBeforeCalendarMeetings) private var remindBeforeCalendar = true
+    @State private var addingFeed = false
+    @State private var accessGranted = CalendarWatcher.hasAccess
+    @State private var accessDenied = CalendarWatcher.accessDenied
+
+    var body: some View {
+        Form {
+            Section("Apple Calendar & Internet Accounts") {
+                LabeledContent("Calendar access") {
+                    if accessGranted {
+                        Label("Connected", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(Theme.accent)
+                            .font(.callout.weight(.medium))
+                    } else if accessDenied {
+                        Button("Open Privacy Settings") {
+                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")!)
+                        }
+                    } else {
+                        Button("Connect Apple Calendar") {
+                            Task {
+                                let ok = await model.calendar.requestAccess()
+                                accessGranted = ok
+                                accessDenied = CalendarWatcher.accessDenied
+                                if ok { model.calendar.start() }
+                            }
+                        }
+                    }
+                }
+                Toggle("Remind me 1 minute before scheduled meetings", isOn: $remindBeforeCalendar.onSet { _ in
+                    model.calendarRemindersChanged()
+                })
+                Text("Reads all calendars added in macOS Calendar (including iCloud, Google, and Exchange accounts in System Settings > Internet Accounts) to populate the Schedule tab, create People profiles, and boost voice recognition.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.fg2)
+
+                if accessGranted, !model.calendar.availableCalendars.isEmpty {
+                    ForEach(model.calendar.availableCalendars) { cal in
+                        Toggle(
+                            "\(cal.title) (\(cal.accountTitle))",
+                            isOn: Binding(
+                                get: { model.calendar.isCalendarEnabled(cal.id) },
+                                set: { model.calendar.setCalendarEnabled(cal.id, enabled: $0) }
+                            )
+                        )
+                    }
+                }
+            }
+
+            Section("Google Calendar & iCal (.ics) Feeds") {
+                if model.calendar.icsFeeds.isEmpty {
+                    Text("No subscribed .ics URLs yet. Paste a Google Calendar \u{201C}Secret address in iCal format\u{201D} to sync your Google Calendar directly in the background without adding it to macOS Calendar.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.fg2)
+                } else {
+                    ForEach(model.calendar.icsFeeds) { feed in
+                        HStack(alignment: .firstTextBaseline, spacing: 10) {
+                            Toggle("", isOn: Binding(
+                                get: { feed.isEnabled },
+                                set: { model.calendar.toggleICSFeed(feed.id, enabled: $0) }
+                            ))
+                            .labelsHidden()
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(feed.name.isEmpty ? "Subscribed Calendar" : feed.name)
+                                    .font(.system(size: 13, weight: .medium))
+                                if let err = feed.lastError {
+                                    Text(err)
+                                        .font(.caption)
+                                        .foregroundStyle(.orange)
+                                } else if let synced = feed.lastSyncedAt {
+                                    Text("\(feed.lastEventCount) events · synced \(synced.formatted(date: .omitted, time: .shortened))")
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.fg2)
+                                } else {
+                                    Text(feed.urlString)
+                                        .font(.caption)
+                                        .foregroundStyle(Theme.fg3)
+                                        .lineLimit(1)
+                                        .truncationMode(.middle)
+                                }
+                            }
+                            Spacer()
+                            Button(role: .destructive) {
+                                model.calendar.removeICSFeed(feed.id)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .foregroundStyle(Theme.fg2)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Remove this .ics subscription")
+                        }
+                    }
+                }
+
+                HStack(spacing: 10) {
+                    Button("Add Google / iCal .ics URL…") { addingFeed = true }
+                    if !model.calendar.icsFeeds.isEmpty || accessGranted {
+                        Button(model.calendar.isSyncingICS ? "Syncing…" : "Sync Now") {
+                            model.calendar.syncICSFeedsNow()
+                        }
+                        .disabled(model.calendar.isSyncingICS)
+                    }
+                }
+            }
+        }
+        .onAppear {
+            accessGranted = CalendarWatcher.hasAccess
+            accessDenied = CalendarWatcher.accessDenied
+        }
+        .sheet(isPresented: $addingFeed) {
+            AddICSFeedSheet { name, url in
+                _ = model.calendar.addICSFeed(name: name, urlString: url)
+                model.calendarRemindersChanged()
             }
         }
     }
@@ -360,8 +499,8 @@ private struct PermissionsPane: View {
                 }
                 LabeledContent("System audio") {
                     HStack {
-                        Text(probe.heardSystemAudio ? "Working" : probe.isRunning ? "Play some audio to check" : "Not checked")
-                            .foregroundStyle(Theme.fg2)
+                        Text(probe.heardSystemAudio ? "Verified" : probe.chimeState == .blocked ? "Blocked" : probe.isRunning ? "Click Test Call Audio below" : "Not checked")
+                            .foregroundStyle(probe.chimeState == .blocked ? .orange : Theme.fg2)
                         Button("Open System Settings") { open("Privacy_AudioCapture") }
                     }
                 }
@@ -374,34 +513,8 @@ private struct PermissionsPane: View {
                     }
                 }
             }
-            Section("Check levels") {
-                HStack {
-                    Text("You").frame(width: 40, alignment: .leading)
-                    LevelBars(level: probe.micLevel, count: 24).frame(height: 10)
-                }
-                HStack {
-                    Text("Call").frame(width: 40, alignment: .leading)
-                    LevelBars(level: probe.systemLevel, count: 24).frame(height: 10)
-                }
-                Button(probe.isRunning ? "Stop" : "Start level check") {
-                    if probe.isRunning {
-                        probe.stop()
-                    } else if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
-                        AVCaptureDevice.requestAccess(for: .audio) { _ in
-                            DispatchQueue.main.async {
-                                micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-                                if !model.recorder.isRecording { probe.start() }
-                            }
-                        }
-                    } else {
-                        micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-                        probe.start()
-                    }
-                }
-                .disabled(model.recorder.isRecording)
-                if let error = probe.micError ?? probe.systemError {
-                    Text(error).font(.caption).foregroundStyle(.orange)
-                }
+            Section("Pre-Meeting Sound Check") {
+                SoundCheckCard(probe: probe, compact: false)
             }
             DiagnosticsSection()
         }

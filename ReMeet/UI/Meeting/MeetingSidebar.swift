@@ -4,78 +4,53 @@ import SwiftUI
 
 struct MeetingSidebar: View {
     @Environment(AppModel.self) private var model
+    @Binding var activeTab: WorkspaceTab
     @Binding var selection: SidebarSelection?
+    @Binding var scheduleSelection: ScheduleSelection?
+    @Binding var selectedPersonID: String?
+    @Binding var momentCategory: MomentFilterOption
+    @Binding var selectedMomentID: String?
     let search: String
+    let onOpenMeetingAt: (MeetingFolder, Double?) -> Void
     @State private var renaming: MeetingItem?
     @State private var renameText = ""
     @State private var deleting: MeetingItem?
     /// Open folder dropdowns, comma-separated ids ("*" = all, for snapshots). Remembered.
     @AppStorage("sidebarExpandedFolders") private var expandedFolders = ""
+    /// Folder IDs whose one-time setup prompt was dismissed.
+    @AppStorage("dismissedFolderHints") private var dismissedFolderHints = ""
     /// Folder or date group ids whose "Show more" is on.
     @State private var showingAll: Set<String> = []
     /// The row a drag is hovering over, drawn highlighted.
     @State private var dropTarget: String?
     @State private var folderEditor: FolderEditor?
     @State private var deletingFolder: MeetingCollection?
+    @State private var hoveredFolderID: String?
 
     var body: some View {
         // Selection is drawn as the Fern "mark" (soft accent tint, accent title, readable meta
         // line) instead of the system highlight, whose white text on the dark-mode green was
         // 2.2:1. Arrow keys still move the selection.
-        // Stack the List above the footer in a VStack rather than `.safeAreaInset(edge: .bottom)`
-        // so scrolled rows clip cleanly at the Divider and never bleed through Import / Settings
-        // in macOS's Liquid Glass sidebar.
+        // Stack the tab switcher, List, and footer in a VStack rather than `.safeAreaInset`
+        // so scrolled rows clip cleanly at the Divider and never bleed through Liquid Glass.
         VStack(spacing: 0) {
-            List {
-                folderSection
-                if model.recorder.isRecording {
-                    LiveRow()
-                        .padding(.vertical, 5)
-                        .padding(.horizontal, 10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contentShape(Rectangle())
-                        .onTapGesture { select(.live) }
-                        .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
-                }
-                ForEach(groups, id: \.0) { group, items in
-                    let list = shown(items, limit: SidebarList.groupLimit, id: group.rawValue)
-                    Section {
-                        ForEach(list.rows) { item in
-                            meetingRow(item, isTodayGroup: group == .today)
-                                // Dropping on the list outside the folders takes a recording out.
-                                .dropDestination(for: String.self) { drops, _ in
-                                    drop(drops, intoFolder: nil)
-                                } isTargeted: { dropTarget = $0 ? item.id : (dropTarget == item.id ? nil : dropTarget) }
-                        }
-                        showMoreRow(id: group.rawValue, hidden: list.hidden, total: items.count, limit: SidebarList.groupLimit)
-                    } header: {
-                        Text(group.rawValue)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Theme.fg3)
-                            .textCase(nil)
-                    }
-                }
-                if groups.isEmpty, search.isEmpty, hasFiledMeetings {
-                    // Everything is in folders: still somewhere to drag a recording out to.
-                    Text("Drag a recording here to take it out of its folder.")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Theme.fg2)
-                        .sidebarRow(selected: dropTarget == "unfiled") {}
-                        .dropDestination(for: String.self) { drops, _ in
-                            drop(drops, intoFolder: nil)
-                        } isTargeted: { dropTarget = $0 ? "unfiled" : (dropTarget == "unfiled" ? nil : dropTarget) }
-                }
-            }
-            .listStyle(.sidebar)
-            .transaction { $0.disablesAnimations = true }
-            .focusable()
-            .focusEffectDisabled()
-            .onKeyPress(.downArrow) { move(1) }
-            .onKeyPress(.upArrow) { move(-1) }
-            .overlay {
-                if !search.isEmpty && groups.isEmpty {
-                    ContentUnavailableView.search(text: search)
-                }
+            tabSwitcher
+            Theme.line.frame(height: 1)
+
+            switch activeTab {
+            case .meetings:
+                meetingsList
+            case .schedule:
+                ScheduleSidebarContent(selection: $scheduleSelection, search: search)
+            case .people:
+                PeopleSidebarContent(selectedPersonID: $selectedPersonID, search: search)
+            case .moments:
+                MomentsSidebarContent(
+                    selectedCategory: $momentCategory,
+                    selectedMomentID: $selectedMomentID,
+                    search: search,
+                    onOpenInMeeting: { folder, time in onOpenMeetingAt(folder, time) }
+                )
             }
 
             Theme.line.frame(height: 1)
@@ -188,6 +163,132 @@ struct MeetingSidebar: View {
             }
         } message: { item in
             Text("\u{201C}\(item.meta.title)\u{201D}, its audio, transcript and summary go to the Trash. You can put them back from there.")
+        }
+    }
+
+    // MARK: - Top Tab Switcher & Meetings List
+
+    private var tabSwitcher: some View {
+        HStack(spacing: 4) {
+            ForEach(WorkspaceTab.allCases) { tab in
+                let isSelected = activeTab == tab
+                Button {
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) { activeTab = tab }
+                } label: {
+                    Image(systemName: tab.symbol)
+                        .font(.system(size: 14, weight: isSelected ? .semibold : .regular))
+                        .foregroundStyle(isSelected ? Theme.accent : Theme.fg2)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .background(isSelected ? Theme.mark : .clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(tab.rawValue)
+                .help(tooltip(for: tab))
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+    }
+
+    private func tooltip(for tab: WorkspaceTab) -> String {
+        switch tab {
+        case .meetings: "Meetings (⌘1)"
+        case .schedule: "Schedule & Commitments (⌘2)"
+        case .people: "People & Voiceprints (⌘3)"
+        case .moments: "Key Moments (⌘4)"
+        }
+    }
+
+    private var meetingsList: some View {
+        List {
+            if search.isEmpty, !model.recorder.isRecording, let upcoming = model.calendar.upNext(withinHours: 2) {
+                Section {
+                    Button {
+                        scheduleSelection = .event(upcoming.id)
+                        activeTab = .schedule
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "calendar.badge.clock")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Theme.accent)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Up next · \(upcoming.start.formatted(date: .omitted, time: .shortened))")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundStyle(Theme.accent)
+                                Text(upcoming.title)
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(Theme.fg)
+                                    .lineLimit(1)
+                            }
+                            Spacer(minLength: 4)
+                            Text("Prep")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(Theme.accent)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Theme.surface, in: Capsule())
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(Theme.mark.opacity(0.65), in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.accent.opacity(0.22)))
+                    }
+                    .buttonStyle(.plain)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 10, bottom: 2, trailing: 10))
+                    .listRowBackground(Color.clear)
+                }
+            }
+            folderSection
+            if model.recorder.isRecording {
+                LiveRow()
+                    .padding(.vertical, 5)
+                    .padding(.horizontal, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
+                    .onTapGesture { select(.live) }
+                    .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+            }
+            ForEach(groups, id: \.0) { group, items in
+                let list = shown(items, limit: SidebarList.groupLimit, id: group.rawValue)
+                Section {
+                    ForEach(list.rows) { item in
+                        meetingRow(item, isTodayGroup: group == .today)
+                            .dropDestination(for: String.self) { drops, _ in
+                                drop(drops, intoFolder: nil)
+                            } isTargeted: { dropTarget = $0 ? item.id : (dropTarget == item.id ? nil : dropTarget) }
+                    }
+                    showMoreRow(id: group.rawValue, hidden: list.hidden, total: items.count, limit: SidebarList.groupLimit)
+                } header: {
+                    Text(group.rawValue)
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.fg3)
+                        .textCase(nil)
+                }
+            }
+            if groups.isEmpty, search.isEmpty, hasFiledMeetings {
+                Text("Drag a recording here to take it out of its folder.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.fg2)
+                    .sidebarRow(selected: dropTarget == "unfiled") {}
+                    .dropDestination(for: String.self) { drops, _ in
+                        drop(drops, intoFolder: nil)
+                    } isTargeted: { dropTarget = $0 ? "unfiled" : (dropTarget == "unfiled" ? nil : dropTarget) }
+            }
+        }
+        .listStyle(.sidebar)
+        .transaction { $0.disablesAnimations = true }
+        .focusable()
+        .focusEffectDisabled()
+        .onKeyPress(.downArrow) { move(1) }
+        .onKeyPress(.upArrow) { move(-1) }
+        .overlay {
+            if !search.isEmpty && groups.isEmpty {
+                ContentUnavailableView.search(text: search)
+            }
         }
     }
 
@@ -332,6 +433,22 @@ struct MeetingSidebar: View {
         meetingsByCollection[folder.id] ?? []
     }
 
+    private func isFolderHintDismissed(_ id: String) -> Bool {
+        dismissedFolderHints.split(separator: ",").contains(Substring(id))
+    }
+
+    private func dismissFolderHint(_ id: String) {
+        var ids = dismissedFolderHints.split(separator: ",").map(String.init)
+        if !ids.contains(id) { ids.append(id) }
+        dismissedFolderHints = ids.joined(separator: ",")
+    }
+
+    private func shouldShowSetupHint(for folder: MeetingCollection) -> Bool {
+        folder.context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (folder.exportDirectoryPath ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !isFolderHintDismissed(folder.id)
+    }
+
     @ViewBuilder private var folderSection: some View {
         // While searching, results are a flat list across folders.
         if search.isEmpty {
@@ -341,9 +458,18 @@ struct MeetingSidebar: View {
                     let items = byFolder[folder.id] ?? []
                     folderRow(folder, count: items.count)
                     if isExpanded(folder.id) {
-                        FolderContextCard(folder: folder) { folderEditor = FolderEditor(collection: folder) }
+                        if shouldShowSetupHint(for: folder) {
+                            FolderContextCard(
+                                folder: folder,
+                                edit: {
+                                    dismissFolderHint(folder.id)
+                                    folderEditor = FolderEditor(collection: folder)
+                                },
+                                dismiss: { dismissFolderHint(folder.id) }
+                            )
                             .listRowInsets(EdgeInsets(top: 2, leading: 32, bottom: 4, trailing: 10))
                             .listRowBackground(Color.clear)
+                        }
                         let list = shown(items, limit: SidebarList.folderLimit, id: folder.id)
                         ForEach(list.rows) { item in
                             meetingRow(item, indent: 20)
@@ -396,6 +522,19 @@ struct MeetingSidebar: View {
                 .foregroundStyle(target ? Theme.accent : Theme.fg)
                 .lineLimit(1)
             Spacer(minLength: 4)
+            if hoveredFolderID == folder.id {
+                Button {
+                    folderEditor = FolderEditor(collection: folder)
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Theme.fg2)
+                        .frame(width: 18, height: 18)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Edit folder context & AI export")
+            }
             if let exportPath = folder.exportDirectoryPath {
                 Image(systemName: "arrow.down.doc")
                     .font(.system(size: 10.5))
@@ -407,6 +546,7 @@ struct MeetingSidebar: View {
                 .foregroundStyle(Theme.fg2)
         }
         .sidebarRow(selected: target) { setExpanded(folder.id, !open) }
+        .onHover { hoveredFolderID = $0 ? folder.id : (hoveredFolderID == folder.id ? nil : hoveredFolderID) }
         .accessibilityValue(open ? "Expanded" : "Collapsed")
         .contextMenu {
             Button("Edit Folder & AI Export…") { folderEditor = FolderEditor(collection: folder) }
@@ -682,39 +822,38 @@ private struct FolderEditorSheet: View {
     }
 }
 
-/// Under the selected folder: its context (and export indicator), or a prompt to add one.
+/// One-time setup prompt shown only for brand-new empty folders with no context or AI export folder yet.
 private struct FolderContextCard: View {
     let folder: MeetingCollection
     let edit: () -> Void
+    let dismiss: () -> Void
 
     var body: some View {
-        Button(action: edit) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(folder.context.isEmpty ? "Add context or AI export folder…" : folder.context)
+        HStack(spacing: 6) {
+            Button(action: edit) {
+                Text("Add context or AI export…")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.fg2)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                if let path = folder.exportDirectoryPath {
-                    HStack(spacing: 4) {
-                        Image(systemName: "arrow.down.doc")
-                            .font(.system(size: 9.5))
-                        Text(path.replacingOccurrences(of: NSHomeDirectory(), with: "~"))
-                            .font(.system(size: 10.5))
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
-                    .foregroundStyle(Theme.accent)
-                }
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Theme.surface.opacity(0.65), in: RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.line.opacity(0.7)))
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .help("Add background context or an AI Markdown export folder for \u{201C}\(folder.name)\u{201D}")
+
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundStyle(Theme.fg3)
+                    .frame(width: 16, height: 16)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss")
         }
-        .buttonStyle(.plain)
-        .help("Edit \u{201C}\(folder.name)\u{201D} context and AI export folder")
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(Theme.surface.opacity(0.65), in: RoundedRectangle(cornerRadius: 7))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(Theme.line.opacity(0.7)))
     }
 }

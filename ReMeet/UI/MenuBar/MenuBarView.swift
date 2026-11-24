@@ -34,10 +34,14 @@ struct MenuBarView: View {
 
 private struct IdlePanel: View {
     @Environment(AppModel.self) private var model
+    @State private var showingSoundCheck = false
+    @State private var probe = LevelProbe()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             Button {
+                probe.stop()
+                showingSoundCheck = false
                 model.toggleRecording()
             } label: {
                 HStack {
@@ -56,16 +60,97 @@ private struct IdlePanel: View {
             .buttonStyle(.plain)
             .disabled(model.recorder.isBusy)
 
-            Text(sourceLine)
-                .font(.caption)
-                .foregroundStyle(Theme.fg2)
-                .lineLimit(1)
+            HStack(spacing: 6) {
+                Image(systemName: idleMicSymbol)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(model.recorder.isBluetoothInput ? Theme.accent : Theme.fg2)
+                Text(sourceLine)
+                    .font(.caption)
+                    .foregroundStyle(Theme.fg2)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Button {
+                    showingSoundCheck.toggle()
+                    if !showingSoundCheck { probe.stop() }
+                } label: {
+                    Text(showingSoundCheck ? "Done" : "Check audio")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(Theme.mark, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .help("Test your microphone, AirPods, and call audio before recording")
+            }
+
+            if showingSoundCheck {
+                SoundCheckCard(probe: probe, compact: true, autoStart: true)
+                    .padding(10)
+                    .background(Theme.bg.opacity(0.75), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Theme.line))
+            }
+
+            if let upcoming = model.calendar.upNext(withinHours: 6) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Up next")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.fg3)
+                    HStack(spacing: 6) {
+                        Button {
+                            model.openSchedule(selecting: upcoming.id)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(upcoming.title)
+                                    .font(.system(size: 12.5, weight: .medium))
+                                    .foregroundStyle(Theme.fg)
+                                    .lineLimit(1)
+                                Text("\(upcoming.start.formatted(date: .omitted, time: .shortened))\(upcoming.callService.map { " · \($0)" } ?? "")")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(Theme.fg2)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open Walk-In Prep Brief")
+
+                        if upcoming.joinURL != nil {
+                            Button("Join & Record") {
+                                model.joinAndRecord(upcoming)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Theme.accentFill)
+                            .controlSize(.small)
+                        } else {
+                            Button("Prep") {
+                                model.openSchedule(selecting: upcoming.id)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
+                    .padding(8)
+                    .background(Theme.mark.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
+                }
+            }
 
             RecentMeetings()
         }
         .padding(.horizontal, 14)
         .padding(.top, 8)
         .padding(.bottom, 10)
+        .onDisappear {
+            probe.stop()
+            showingSoundCheck = false
+        }
+    }
+
+    private var idleMicSymbol: String {
+        let lower = (model.recorder.inputDevice?.name ?? "").lowercased()
+        if lower.contains("airpods") { return "airpodspro" }
+        if model.recorder.isBluetoothInput { return "headphones" }
+        return "mic.fill"
     }
 
     private var sourceLine: String {
@@ -134,29 +219,61 @@ private struct RecordingPanel: View {
                 LevelRow(label: "Call", level: recorder.systemLevel)
             }
 
-            Text(micLine)
-                .font(.caption)
-                .foregroundStyle(Theme.fg2)
-                .lineLimit(1)
+            if let issue = recorder.activeAudioIssue {
+                LiveAudioIssueBanner(
+                    issue: issue,
+                    compact: false,
+                    onAction: { recorder.performAudioIssueAction($0) },
+                    onDismiss: { recorder.dismissAudioIssue(issue.kind) }
+                )
+            }
+
+            HStack(spacing: 5) {
+                Image(systemName: recordingMicSymbol)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundStyle(recorder.isBluetoothInput ? Theme.accent : Theme.fg2)
+                Text(micLine)
+                    .font(.caption)
+                    .foregroundStyle(Theme.fg2)
+                    .lineLimit(1)
+            }
 
             HStack(spacing: 8) {
                 Button {
                     model.addNoteShortcut()
                 } label: {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 5) {
                         Image(systemName: "square.and.pencil")
                         Text("Note")
                         Text(KeyboardShortcuts.Name.addNote.hint).font(.system(size: 11)).foregroundStyle(Theme.fg3)
                     }
-                    .font(.system(size: 12.5, weight: .medium))
+                    .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(Theme.fg)
-                    .padding(.horizontal, 10)
+                    .padding(.horizontal, 9)
                     .padding(.vertical, 6)
                     .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Theme.line))
                     .fixedSize()
                 }
                 .buttonStyle(.plain)
+
+                Button {
+                    model.markMomentShortcut()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "pin")
+                        Text("Pin")
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.fg)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
+                    .background(Theme.surface, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Theme.line))
+                    .fixedSize()
+                }
+                .buttonStyle(.plain)
+                .help("Mark this moment (\(KeyboardShortcuts.Name.markMoment.hint))")
 
                 Button {
                     recorder.stop()
@@ -235,6 +352,13 @@ private struct RecordingPanel: View {
         .onAppear { title = recorder.title }
     }
 
+    private var recordingMicSymbol: String {
+        let lower = (model.recorder.inputDevice?.name ?? "").lowercased()
+        if lower.contains("airpods") { return "airpodspro" }
+        if model.recorder.isBluetoothInput { return "headphones" }
+        return "mic.fill"
+    }
+
     private var micLine: String {
         let recorder = model.recorder
         let name = recorder.inputDevice?.name ?? "No microphone"
@@ -295,9 +419,10 @@ private struct ExtraRows: View {
 
     var body: some View {
         let failed = model.failedMeetings
-        if model.queue.current != nil || !failed.isEmpty || model.recorder.warning != nil {
+        let nonIssueWarning = model.recorder.activeAudioIssue == nil ? model.recorder.warning : nil
+        if model.queue.current != nil || !failed.isEmpty || nonIssueWarning != nil {
             VStack(alignment: .leading, spacing: 8) {
-                if let warning = model.recorder.warning {
+                if let warning = nonIssueWarning {
                     Label(warning, systemImage: "speaker.slash")
                         .font(.callout)
                         .foregroundStyle(.orange)
@@ -364,6 +489,11 @@ private struct FooterRows: View {
                 ShortcutHint("⌘O")
             }
             .keyboardShortcut("o", modifiers: .command)
+            MenuRow { model.switchTab(.people) } label: {
+                Text("People & Schedule")
+                Spacer()
+                ShortcutHint("⌘3")
+            }
             MenuRow { model.openSettings() } label: {
                 Text("Settings…")
                 Spacer()

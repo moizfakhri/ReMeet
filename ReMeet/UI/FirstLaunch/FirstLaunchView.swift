@@ -82,20 +82,18 @@ struct FirstLaunchView: View {
                     }
                 }
             }
-            PermissionRow(title: "Call audio", detail: "What the other people say. Play some audio: the meter should move.",
-                          granted: probe.heardSystemAudio, level: probe.systemLevel) {
+            PermissionRow(title: "Call audio", detail: "What the other people say. Click Test to play a quick chime and verify.",
+                          granted: probe.heardSystemAudio, level: probe.systemLevel, buttonTitle: "Test") {
                 if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
                     AVCaptureDevice.requestAccess(for: .audio) { _ in
                         DispatchQueue.main.async {
                             micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-                            probe.stop()
-                            if !model.recorder.isRecording { probe.start() }
+                            if !model.recorder.isRecording { probe.runCallAudioTest() }
                         }
                     }
                 } else {
                     micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-                    probe.stop()
-                    if !model.recorder.isRecording { probe.start() }
+                    if !model.recorder.isRecording { probe.runCallAudioTest() }
                 }
             }
             PermissionRow(title: "Notifications", detail: "Tells you when a summary is ready.",
@@ -170,6 +168,7 @@ private struct PermissionRow: View {
     let detail: String
     let granted: Bool
     let level: Float?
+    var buttonTitle: String = "Allow"
     let action: () -> Void
 
     var body: some View {
@@ -184,10 +183,10 @@ private struct PermissionRow: View {
             }
             Spacer()
             if let level {
-                LevelBars(level: level, count: 10).frame(width: 60, height: 10)
+                ProbeLevelBars(level: level, count: 10).frame(width: 60, height: 10)
             }
             if !granted {
-                Button("Allow", action: action)
+                Button(buttonTitle, action: action)
             }
         }
     }

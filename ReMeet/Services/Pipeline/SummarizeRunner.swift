@@ -28,10 +28,17 @@ struct SummarizeRunner: StageRunner {
             summary = MeetingSummary(title: meta.title, summary: [SummaryPoint(text: "No speech was detected in this recording.")])
             SummaryParser.enforceNotes(&summary, notes: notes)
         } else {
+            let folderCtx = CollectionsFile(for: folder).context(for: meta)
+            let peopleStore = PeopleFile.load(PeopleFile.url(beside: folder.url.deletingLastPathComponent()))
+            let peopleCtx = PeopleDirectory.summaryContext(for: speakers, calendarAttendees: meta.calendarAttendees, store: peopleStore)
+            let combinedContext = [folderCtx, peopleCtx]
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
             let input = SummaryPrompt.Input(title: meta.title, date: meta.startTime, duration: meta.effectiveDuration,
                                             lines: SummaryPrompt.lines(from: transcript, speakers: speakers),
                                             notes: notes, customInstructions: customInstructions(),
-                                            folderContext: CollectionsFile(for: folder).context(for: meta),
+                                            folderContext: combinedContext,
                                             recorderName: recorderName())
             var sonnetSummary: MeetingSummary?
             if useSonnet {

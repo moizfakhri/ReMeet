@@ -16,6 +16,7 @@ struct MeetingDetailView: View {
     @State private var editingDate = false
     @State private var draftDate = Date()
     @State private var dateHovered = false
+    @State private var copiedFollowUp = false
     @FocusState private var titleFocused: Bool
 
     init(document: MeetingDocument, player: PlayerModel, showTranscript: Binding<Bool>) {
@@ -29,10 +30,10 @@ struct MeetingDetailView: View {
 
     var body: some View {
         ScrollViewReader { proxy in
-        ScrollView {
+        ResponsiveDocumentScroll(maxWidth: 660, topPadding: 24, bottomPadding: 128) { width in
             VStack(alignment: .leading, spacing: 24) {
                 header
-                MeetingChatPanel(document: document, player: player, showTranscript: $showTranscript)
+                MeetingChatPanel(document: document, player: player, showTranscript: $showTranscript, compact: width < 400)
                     .id(MeetingChatPanel.anchorID)
                 if let error = document.loadError {
                     Text(error).foregroundStyle(.orange).font(.callout)
@@ -64,6 +65,16 @@ struct MeetingDetailView: View {
                         model.queue.stop(document.folder)
                     }
                 }
+                if !document.pulse.shares.isEmpty {
+                    ConversationPulseBar(
+                        pulse: document.pulse,
+                        moments: document.moments,
+                        hasAudio: document.folder.exists(.audio),
+                        onScrub: jump,
+                        onSelectSpeaker: { name in model.openPerson(named: name) }
+                    )
+                }
+                KeyMomentsSection(document: document, player: player, onJumpToTranscript: jump)
                 if let summary = document.summary {
                     SummarySections(summary: summary, document: document, onJump: jump)
                 }
@@ -75,17 +86,8 @@ struct MeetingDetailView: View {
                     PointsSection(title: "Open questions", points: summary.openQuestions, onJump: jump)
                 }
                 SpeakerNamingSection(document: document, meetingPlayer: player)
-                if document.summary != nil {
-                    footer
-                }
             }
-            .frame(maxWidth: 640, alignment: .leading)
-            .padding(.horizontal, 40)
-            .padding(.top, 26)
-            .padding(.bottom, 132)
-            .frame(maxWidth: .infinity)
         }
-        .background(Theme.surface)
         .overlay(alignment: .bottom) {
             // Solid Theme.surface covers the full height of PlayerCapsule (+ 12 pt above it)
             // so scrolled content fades cleanly before reaching the capsule and never refracts
@@ -102,7 +104,7 @@ struct MeetingDetailView: View {
             .overlay(alignment: .bottom) {
                 PlayerCapsule(player: player, notes: document.notes)
                     .padding(.bottom, 18)
-                    .padding(.horizontal, 24)
+                    .padding(.horizontal, 12)
             }
         }
         .onAppear {
@@ -137,16 +139,20 @@ struct MeetingDetailView: View {
                 .onSubmit(commitTitle)
                 .onChange(of: titleFocused) { _, focused in if !focused { commitTitle() } }
 
-            // Row 1: Pure meeting facts (never competes with interactive menus or truncates).
-            HStack(spacing: 6) {
+            // Row 1: Pure meeting facts (wraps cleanly without clipping on narrow widths).
+            WrappingFlowLayout(spacing: 6, lineSpacing: 4) {
                 dateButton
                 if document.meta.effectiveDuration > 0 {
-                    Text("·").foregroundStyle(Theme.fg3)
-                    Text(TimeFormat.duration(document.meta.effectiveDuration))
+                    HStack(spacing: 6) {
+                        Text("·").foregroundStyle(Theme.fg3)
+                        Text(TimeFormat.duration(document.meta.effectiveDuration))
+                    }
                 }
                 if document.wordCount > 0 {
-                    Text("·").foregroundStyle(Theme.fg3)
-                    Text("\(document.wordCount.formatted()) words")
+                    HStack(spacing: 6) {
+                        Text("·").foregroundStyle(Theme.fg3)
+                        Text("\(document.wordCount.formatted()) words")
+                    }
                 }
                 if let app = MeetingApps.displayName(for: document.meta.sourceApp) {
                     Text(app)
@@ -156,20 +162,54 @@ struct MeetingDetailView: View {
                         .padding(.vertical, 2)
                         .background(Theme.bg, in: Capsule())
                         .overlay(Capsule().stroke(Theme.line))
-                        .padding(.leading, 4)
+                        .padding(.leading, 2)
                 }
-                Spacer(minLength: 0)
             }
             .font(.system(size: 13))
             .foregroundStyle(Theme.fg2)
-            .lineLimit(1)
 
-            // Row 2: Compact pill controls for folder, speakers, and transcription wording.
-            HStack(spacing: 8) {
+            // Row 2: Compact wrapping pill controls for folder, speakers, wording, calendar, and follow-up.
+            WrappingFlowLayout(spacing: 7, lineSpacing: 7) {
                 folderMenu
                 callSpeakerMenu
                 engineMenu
-                Spacer(minLength: 0)
+                if let eventID = document.meta.calendarEventID {
+                    Button {
+                        model.openSchedule(selecting: eventID)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "calendar")
+                                .font(.system(size: 10.5))
+                            Text(document.meta.calendarName ?? "Calendar")
+                                .lineLimit(1)
+                        }
+                        .foregroundStyle(Theme.fg2)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(Theme.bg, in: Capsule())
+                        .overlay(Capsule().stroke(Theme.line))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Linked to your calendar invite — click to view schedule & attendees")
+                }
+                if let summary = document.summary {
+                    Button {
+                        copyFollowUp(summary: summary)
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: copiedFollowUp ? "checkmark" : "paperplane")
+                                .font(.system(size: 10.5))
+                            Text(copiedFollowUp ? "Copied follow-up" : "Follow-up")
+                        }
+                        .foregroundStyle(copiedFollowUp ? Theme.accent : Theme.fg2)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 4)
+                        .background(copiedFollowUp ? Theme.mark : Theme.bg, in: Capsule())
+                        .overlay(Capsule().stroke(copiedFollowUp ? Theme.accent.opacity(0.3) : Theme.line))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Copy a clean Slack / email follow-up message with decisions and owners")
+                }
             }
             .font(.system(size: 12))
 
@@ -186,10 +226,12 @@ struct MeetingDetailView: View {
                             .foregroundStyle(Theme.accent)
                     }
                 }
-            } else if let written = document.meta.processing.transcriptionEngine, !written.isEmpty {
-                Text(written.contains("Sonnet") ? "Wording: \(written)" : "Wording: \(written). Sonnet 5.5 has not cleaned this yet.")
+            } else if let written = document.meta.processing.transcriptionEngine,
+                      !written.isEmpty,
+                      !written.contains("Sonnet") {
+                Text("Wording: \(written). Sonnet 5.5 has not cleaned this yet.")
                     .font(.system(size: 12))
-                    .foregroundStyle(written.contains("Sonnet") ? Theme.fg3 : .orange)
+                    .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -303,7 +345,7 @@ struct MeetingDetailView: View {
         Menu {
             Button("Auto") { model.applyCallSpeakers(document, count: nil) }
             Divider()
-            ForEach(1...8, id: \.self) { count in
+            ForEach(1...12, id: \.self) { count in
                 Button("\(count)") { model.applyCallSpeakers(document, count: count) }
             }
         } label: {
@@ -392,21 +434,6 @@ struct MeetingDetailView: View {
         return "Engine"
     }
 
-    @ViewBuilder private var footer: some View {
-        let p = document.meta.processing
-        HStack(spacing: 6) {
-            if let seconds = p.summarySeconds {
-                Text("Written \(summaryAttribution(p.summaryBackend)) in \(TimeFormat.duration(seconds))")
-            }
-            if let backend = p.summaryBackend {
-                Text("·")
-                Text([backend, p.summaryModel].compactMap { $0 }.joined(separator: " "))
-            }
-        }
-        .font(.system(size: 12))
-        .foregroundStyle(Theme.fg3)
-    }
-
     @ViewBuilder private var sonnetNotes: some View {
         let notes = [document.meta.processing.sonnetTranscriptNote, document.meta.processing.sonnetSummaryNote]
             .compactMap { $0 }
@@ -422,12 +449,6 @@ struct MeetingDetailView: View {
                 }
             }
         }
-    }
-
-    private func summaryAttribution(_ backend: String?) -> String {
-        if backend == "Gemini" { return "by Gemini" }
-        if backend?.contains("Sonnet") == true { return "by Sonnet" }
-        return "on this Mac"
     }
 
     private func commitTitle() {
@@ -450,6 +471,29 @@ struct MeetingDetailView: View {
         player.play(from: max(0, t - 1))
         model.transcriptJump = t
         showTranscript = true
+    }
+
+    private func copyFollowUp(summary: MeetingSummary) {
+        var participants = document.callSpeakers.map { document.speakers.displayName(for: $0) }
+        for att in document.meta.calendarAttendees where att.status != .declined {
+            if !participants.contains(where: { SpeakerMemory.namesMatch($0, att.name) }) {
+                participants.append(att.name)
+            }
+        }
+        let message = FollowUpComposer.compose(
+            title: document.meta.title,
+            date: document.meta.startTime,
+            participants: participants,
+            summary: summary,
+            recorderName: AppModel.recorderName
+        )
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(message, forType: .string)
+        copiedFollowUp = true
+        Task {
+            try? await Task.sleep(for: .seconds(1.6))
+            copiedFollowUp = false
+        }
     }
 }
 
@@ -490,6 +534,17 @@ private struct SummarySections: View {
     let summary: MeetingSummary
     let document: MeetingDocument
     let onJump: (Double) -> Void
+    @State private var showOthers = false
+
+    private var partitioned: (mine: [ActionItem], related: [ActionItem], others: [ActionItem]) {
+        let otherCount = max(
+            document.callSpeakers.count,
+            document.meta.calendarAttendees.filter { $0.status != .declined }.count
+        )
+        return CommitmentsRadar.partition(summary.actionItems,
+                                          recorderName: AppModel.recorderName,
+                                          otherParticipantCount: otherCount)
+    }
 
     var body: some View {
         if !summary.summary.isEmpty {
@@ -500,17 +555,88 @@ private struct SummarySections: View {
                 }
             }
         }
-        if !summary.actionItems.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
+        let tiers = partitioned
+        if !tiers.mine.isEmpty || !tiers.related.isEmpty || !tiers.others.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
                 SectionHeader(title: "Action items")
-                ForEach(summary.actionItems) { item in
-                    ActionItemRow(item: item, onJump: onJump) { done in
-                        document.setActionItem(item, done: done)
-                        model.documentEdited(document)
+
+                if !tiers.mine.isEmpty {
+                    tierHeader("For you", color: Theme.accent)
+                    ForEach(tiers.mine) { item in
+                        actionRow(item, tier: .mine)
+                    }
+                }
+
+                if !tiers.related.isEmpty {
+                    tierHeader("Waiting on others", color: Theme.fg2)
+                        .padding(.top, tiers.mine.isEmpty ? 0 : 2)
+                    ForEach(tiers.related) { item in
+                        actionRow(item, tier: .relatedToMe)
+                    }
+                }
+
+                if !tiers.others.isEmpty {
+                    let expandByDefault = tiers.mine.isEmpty && tiers.related.isEmpty
+                    if expandByDefault {
+                        ForEach(tiers.others) { item in
+                            actionRow(item, tier: .others)
+                        }
+                    } else {
+                        Button {
+                            withAnimation(.snappy(duration: 0.16)) { showOthers.toggle() }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .rotationEffect(.degrees(showOthers ? 90 : 0))
+                                Text("Other team items (\(tiers.others.count))")
+                                    .font(.system(size: 12, weight: .medium))
+                            }
+                            .foregroundStyle(Theme.fg3)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Show or hide action items owned by others that do not involve you")
+
+                        if showOthers {
+                            ForEach(tiers.others) { item in
+                                actionRow(item, tier: .others)
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+
+    private func tierHeader(_ title: String, color: Color) -> some View {
+        Text(title)
+            .font(.system(size: 11.5, weight: .semibold))
+            .foregroundStyle(color)
+    }
+
+    private func actionRow(_ item: ActionItem, tier: CommitmentItem.Relevance) -> some View {
+        ActionItemRow(
+            item: item,
+            tier: tier,
+            onJump: onJump,
+            onToggle: { done in
+                document.setActionItem(item, done: done)
+                model.documentEdited(document)
+            },
+            onAssignToYou: {
+                document.updateActionItem(item, owner: .some("You"), relatesToMe: .some(true))
+                model.documentEdited(document)
+            },
+            onSetRelated: { related in
+                document.updateActionItem(item, relatesToMe: .some(related))
+                model.documentEdited(document)
+            },
+            onDismiss: {
+                document.updateActionItem(item, dismissed: true)
+                model.documentEdited(document)
+            }
+        )
     }
 }
 
@@ -537,8 +663,12 @@ struct BulletRow: View {
 
 private struct ActionItemRow: View {
     let item: ActionItem
+    let tier: CommitmentItem.Relevance
     let onJump: (Double) -> Void
     let onToggle: (Bool) -> Void
+    let onAssignToYou: () -> Void
+    let onSetRelated: (Bool) -> Void
+    let onDismiss: () -> Void
     @State private var hovering = false
 
     var body: some View {
@@ -558,12 +688,35 @@ private struct ActionItemRow: View {
             if !meta.isEmpty {
                 Text(meta)
                     .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(Theme.fg2)
+                    .foregroundStyle(tier == .mine ? Theme.accent : Theme.fg2)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 2)
-                    .background(Theme.bg, in: Capsule())
-                    .overlay(Capsule().stroke(Theme.line))
+                    .background(tier == .mine ? Theme.mark : Theme.bg, in: Capsule())
+                    .overlay(Capsule().stroke(tier == .mine ? Theme.accent.opacity(0.25) : Theme.line))
             }
+            Menu {
+                if tier != .mine {
+                    Button("Assign to You", action: onAssignToYou)
+                }
+                if tier == .others {
+                    Button("Mark as waiting on them (for you)") { onSetRelated(true) }
+                } else if tier == .relatedToMe {
+                    Button("Move to other team items") { onSetRelated(false) }
+                }
+                Divider()
+                Button("Dismiss action item", role: .destructive, action: onDismiss)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.fg3)
+                    .frame(width: 18, height: 18)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .opacity(hovering ? 1 : 0)
+            .allowsHitTesting(hovering)
         }
         .onHover { hovering = $0 }
     }
@@ -749,13 +902,14 @@ private struct SpeakerNamingSection: View {
     let meetingPlayer: PlayerModel
     @State private var drafts: [String: String] = [:]
     @State private var memory = SpeakerMemory()
-    @State private var suggestions: [String: String] = [:]
+    @State private var suggestions: [String: VoiceSuggestion] = [:]
     @State private var preview = SpeakerClipPlayer()
     @State private var savedID: String?
     @State private var notice: String?
     @State private var noticeIsError = false
     @State private var cleaning = false
     @State private var cleanGeneration = 0
+    @State private var dismissedSuggestions: Set<String> = []
 
     @State private var expanded = false
 
@@ -769,40 +923,55 @@ private struct SpeakerNamingSection: View {
         let ids = document.callSpeakers
         if !ids.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                Button {
-                    withAnimation(.snappy(duration: 0.18)) { expanded.toggle() }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(Theme.fg3)
-                            .rotationEffect(.degrees(expanded ? 90 : 0))
-                            .frame(width: 12)
-                        SectionHeader(title: "Speakers")
-                        Text(ids.map { document.speakers.displayName(for: $0) }.joined(separator: ", "))
-                            .font(.system(size: 13))
-                            .foregroundStyle(Theme.fg2)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                        Spacer(minLength: 8)
-                        if !expanded, unnamedCount > 0 {
-                            Text("\(unnamedCount) unnamed")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(Theme.accent)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .background(Theme.mark, in: Capsule())
+                HStack(spacing: 8) {
+                    Button {
+                        withAnimation(.snappy(duration: 0.18)) { expanded.toggle() }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Theme.fg3)
+                                .rotationEffect(.degrees(expanded ? 90 : 0))
+                                .frame(width: 12)
+                            SectionHeader(title: "Speakers")
+                            Text(ids.map { document.speakers.displayName(for: $0) }.joined(separator: ", "))
+                                .font(.system(size: 13))
+                                .foregroundStyle(Theme.fg2)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
                         }
+                        .contentShape(Rectangle())
                     }
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    .help("Play a clip and pick or type a name, or click any speaker name in the transcript")
+
+                    Spacer(minLength: 8)
+
+                    if expanded, document.hasSystemTrack, ids.count < 12 {
+                        Button {
+                            model.applyCallSpeakers(document, count: min(12, ids.count + 1))
+                        } label: {
+                            Label("Find more", systemImage: "person.badge.plus")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Theme.fg2)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2.5)
+                                .background(Theme.surface, in: Capsule())
+                                .overlay(Capsule().stroke(Theme.line))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Missed someone on the call? Re-run speaker detection looking for \(ids.count + 1) voices")
+                    } else if !expanded, unnamedCount > 0 {
+                        Text("\(unnamedCount) unnamed")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Theme.accent)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 2)
+                            .background(Theme.mark, in: Capsule())
+                    }
                 }
-                .buttonStyle(.plain)
 
                 if expanded {
-                    Text("Play a clip and type a name, or select their words in the transcript. ReMeet remembers each voice for later meetings.")
-                        .font(.caption)
-                        .foregroundStyle(Theme.fg2)
-                        .fixedSize(horizontal: false, vertical: true)
                     if let notice {
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text(notice)
@@ -830,6 +999,7 @@ private struct SpeakerNamingSection: View {
                 savedID = nil
                 notice = nil
                 expanded = false
+                dismissedSuggestions = []
                 await load(ids)
             }
             .onChange(of: document.speakers) { _, _ in
@@ -850,6 +1020,12 @@ private struct SpeakerNamingSection: View {
         let currentDraft = (drafts[id] ?? document.speakers.names[id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let savedName = (document.speakers.names[id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let dirty = currentDraft != savedName
+        let isUnnamed = SpeakerMemory.isPlaceholder(savedName)
+        let inviteHints = isUnnamed
+            ? CalendarSpeakerHints.unassignedInvitees(attendees: document.meta.calendarAttendees,
+                                                      existing: document.speakers,
+                                                      recorderName: AppModel.recorderName)
+            : []
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Button {
@@ -863,6 +1039,9 @@ private struct SpeakerNamingSection: View {
                 .buttonStyle(.plain)
                 .disabled(!canPlay && !playing)
                 .help(playing ? "Pause this clip" : (canPlay ? "Play a short clip of this voice from the call audio" : "The call audio for this clip is no longer on disk"))
+                if !isUnnamed {
+                    PersonAvatarView(name: savedName, size: 20)
+                }
                 TextField(document.speakers.displayName(for: id), text: binding(id))
                     .textFieldStyle(.plain)
                     .font(.system(size: 13, weight: .semibold))
@@ -878,16 +1057,80 @@ private struct SpeakerNamingSection: View {
                     Text("Saved")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(Theme.accent)
+                } else if !isUnnamed {
+                    Button {
+                        model.openPerson(named: savedName)
+                    } label: {
+                        Image(systemName: "person.text.rectangle")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.fg3)
+                            .hitTarget(4)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Open \(savedName) in People")
                 }
-                Spacer(minLength: 8)
-                if let name = suggestions[id] {
-                    Button("Sounds like \(name)") { commit(id, name: name) }
+                Spacer(minLength: 4)
+                if let suggestion = suggestions[id],
+                   !dismissedSuggestions.contains("\(id)::\(suggestion.name)") {
+                    HStack(spacing: 4) {
+                        Button {
+                            commit(id, name: suggestion.name)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: suggestion.onInvite ? "calendar.badge.checkmark" : "waveform")
+                                    .font(.system(size: 10))
+                                Text(suggestion.onInvite
+                                     ? "\(suggestion.name) · On invite"
+                                     : "Sounds like \(suggestion.name)")
+                                    .lineLimit(1)
+                            }
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Theme.accent)
+                        }
                         .buttonStyle(.plain)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Theme.accent)
-                        .help("Use this saved voice for this person only")
+                        .help("Use this saved voiceprint for this speaker")
+
+                        Button {
+                            dismissedSuggestions.insert("\(id)::\(suggestion.name)")
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(Theme.fg3)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Dismiss suggestion")
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Theme.mark, in: Capsule())
                 }
+                quickPickMenu(id, isUnnamed: isUnnamed, inviteHints: inviteHints)
                 mergeMenu(id, people: people)
+            }
+            if isUnnamed, !inviteHints.isEmpty {
+                WrappingFlowLayout(spacing: 6, lineSpacing: 5) {
+                    Image(systemName: "calendar")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Theme.fg3)
+                        .padding(.top, 3)
+                        .help("Invited on calendar — click to assign")
+                    ForEach(inviteHints.prefix(5), id: \.self) { invitee in
+                        Button {
+                            commit(id, name: invitee)
+                        } label: {
+                            Text(invitee)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Theme.fg)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2)
+                                .background(Theme.surface, in: Capsule())
+                                .overlay(Capsule().stroke(Theme.line))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Assign \(invitee) and save their voiceprint for future calls")
+                    }
+                }
+                .padding(.leading, 30)
             }
             if let sameName {
                 Button("Merge with the other \(sameName)") { merge(id, intoFirstNamed: sameName, among: people) }
@@ -911,6 +1154,67 @@ private struct SpeakerNamingSection: View {
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(Theme.accent)
             .help("These two rows sound like the same person. Nothing merges until you click.")
+    }
+
+    private func quickPickMenu(_ id: String, isUnnamed: Bool, inviteHints: [String]) -> some View {
+        let assignedLower = Set(document.speakers.names.values.map { $0.lowercased() })
+        let candidates = model.hub.people.filter { person in
+            let lower = person.profile.name.lowercased()
+            return !assignedLower.contains(lower)
+                && !inviteHints.contains { SpeakerMemory.namesMatch($0, person.profile.name) }
+        }
+        return Menu {
+            if !inviteHints.isEmpty {
+                Section("Calendar invite") {
+                    ForEach(inviteHints, id: \.self) { invitee in
+                        Button(invitee) { commit(id, name: invitee) }
+                    }
+                }
+            }
+            if let emb = document.diarization?.embeddings[id], !emb.isEmpty {
+                let attendees = document.meta.calendarAttendees.filter { $0.status != .declined }.map(\.name)
+                let ranked = memory.rankedMatches(for: emb, attendeeNames: attendees, limit: 3)
+                if !ranked.isEmpty {
+                    Section("Voice matches") {
+                        ForEach(ranked, id: \.name) { match in
+                            Button("\(match.name) (\(Int((match.score * 100).rounded()))%)") {
+                                commit(id, name: match.name)
+                            }
+                        }
+                    }
+                }
+            }
+            if !candidates.isEmpty {
+                Section("People") {
+                    ForEach(candidates.prefix(20)) { person in
+                        Button(person.profile.name) { commit(id, name: person.profile.name) }
+                    }
+                }
+            }
+            if !isUnnamed {
+                Divider()
+                Button("Clear name & unlearn voice", role: .destructive) {
+                    drafts[id] = ""
+                    document.clearSpeakerName(id)
+                    memory = SpeakerMemoryFile.load(SpeakerMemoryFile.url(beside: document.folder))
+                    recomputeSuggestions()
+                    notice = "Cleared name."
+                    noticeIsError = false
+                    model.library.refresh(document.folder)
+                    model.documentEdited(document, reindexSearch: true)
+                }
+            }
+        } label: {
+            Image(systemName: "chevron.down")
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundStyle(Theme.fg2)
+                .frame(width: 20, height: 20)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Pick from calendar invitees or People, or clear name")
     }
 
     private func mergeMenu(_ id: String, people: [String]) -> some View {
@@ -950,8 +1254,9 @@ private struct SpeakerNamingSection: View {
             suggestions = [:]
             return
         }
-        let offered = memory.suggestions(for: embeddings, existing: document.speakers)
-        suggestions = Dictionary(uniqueKeysWithValues: offered.map { ($0.speaker, $0.name) })
+        let inviteNames = document.meta.calendarAttendees.filter { $0.status != .declined }.map(\.name)
+        let offered = memory.suggestions(for: embeddings, existing: document.speakers, attendeeNames: inviteNames)
+        suggestions = Dictionary(uniqueKeysWithValues: offered.map { ($0.speaker, $0) })
     }
 
     private func toggleClip(_ id: String) {

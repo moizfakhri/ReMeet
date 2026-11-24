@@ -31,7 +31,7 @@ final class MeetingPromptController {
         self.event = event
         // Card plus clear margin, so the glass shadow is not cut off by the window edge.
         let margin = BubbleController.margin
-        let size = CGSize(width: 340 + 2 * margin, height: (event == nil ? 92 : 108) + 2 * margin)
+        let size = CGSize(width: 340 + 2 * margin, height: 108 + 2 * margin)
         let visible = NSScreen.main?.visibleFrame ?? .zero
         let frame = BubbleGeometry.defaultFrame(size: size, visibleFrame: visible, margin: 16 - margin)
         let panel = self.panel ?? BubblePanel(contentRect: frame)
@@ -102,6 +102,13 @@ private struct PromptView: View {
                     .fixedSize()
                 }
                 .buttonStyle(.glassProminent)
+                if let event {
+                    Button("Brief") {
+                        dismiss()
+                        AppModel.shared.openSchedule(selecting: event.id)
+                    }
+                    .buttonStyle(.glass)
+                }
                 Button("Not now", action: dismiss)
                     .buttonStyle(.glass)
             }
@@ -130,12 +137,18 @@ private struct PromptView: View {
     }
 
     private var detail: String? {
-        guard let event else { return nil }
         var parts: [String] = []
-        if app != nil, !event.title.isEmpty { parts.append(event.title) }
-        if let service = event.callService { parts.append(service) }
-        let people = event.attendeeNames.count
-        if people > 0 { parts.append(people == 1 ? "with \(event.attendeeNames[0])" : "\(people + 1) people") }
+        if let event {
+            if app != nil, !event.title.isEmpty { parts.append(event.title) }
+            if let service = event.callService { parts.append(service) }
+            let people = event.attendeeNames.count
+            if people > 0 { parts.append(people == 1 ? "with \(event.attendeeNames[0])" : "\(people + 1) people") }
+        }
+        let micName = CoreAudioUtil.activeMeetingAppInputDevice()?.device.name
+            ?? AppModel.shared.recorder.inputDevice?.name
+        if let micName, !micName.isEmpty {
+            parts.append(micName)
+        }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 }

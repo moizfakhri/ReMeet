@@ -17,6 +17,8 @@ final class BubbleState {
     /// Seconds from recording start when the field was opened; this becomes the note's `t`.
     var openedAt: Double = 0
     var focusRequest = 0
+    /// Short confirmation ("Pinned 12:34") shown briefly on the pill after `⌥⌘M` or the Pin button.
+    var pinnedConfirmation: String?
 }
 
 /// The floating note bubble: a non-activating panel over every Space (full-screen calls
@@ -28,8 +30,8 @@ final class BubbleController: NSObject, NSWindowDelegate {
     /// with only 4 pt the window edge cut it off into a grey rectangle below the card.
     static let margin: CGFloat = 24
     /// The visible cards (pill and note field); the window is a card plus `margin` all round.
-    static let pillCard = CGSize(width: 272, height: 40)
-    static let noteCard = CGSize(width: 352, height: 206)
+    static let pillCard = CGSize(width: 312, height: 40)
+    static let noteCard = CGSize(width: 364, height: 228)
     static let collapsedSize = CGSize(width: pillCard.width + 2 * margin, height: pillCard.height + 2 * margin)
     static let expandedSize = CGSize(width: noteCard.width + 2 * margin, height: noteCard.height + 2 * margin)
     private static let frameKey = "bubbleFrame"
@@ -230,6 +232,24 @@ final class BubbleController: NSObject, NSWindowDelegate {
     func cancel() {
         state.draft = ""
         collapse()
+    }
+
+    private var pinFlashTask: Task<Void, Never>?
+
+    /// ⌥⌘M or the Pin button: drops an instant Moment pin at `now - 1.5s` without stealing focus.
+    func pinMoment() {
+        hoverWork?.cancel()
+        guard let now = timestamp() else { return }
+        let target = (max(0, now - 1.5) * 10).rounded() / 10
+        let pin = MeetingNote(t: target, text: "", kind: .bookmark)
+        onNote?(pin)
+        state.pinnedConfirmation = "Pinned \(TimeFormat.clock(target))"
+        pinFlashTask?.cancel()
+        pinFlashTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1.8))
+            guard !Task.isCancelled else { return }
+            self?.state.pinnedConfirmation = nil
+        }
     }
 
     /// The call ended: show the countdown in the pill when it is allowed on screen.

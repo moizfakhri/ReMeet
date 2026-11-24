@@ -115,7 +115,9 @@ enum ClaudeSonnet {
         let hasWords = transcript.segments.contains { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         guard hasWords else { return false }
         let ticket = await WordingRevision.shared.issue()
-        let context = NameGlossary.context(recorderName: recorderName, speakers: speakers, segments: transcript.segments)
+        let attendees = ((try? folder.readMeta().calendarAttendees) ?? []).filter { $0.status != .declined }.map(\.name)
+        let context = NameGlossary.context(recorderName: recorderName, speakers: speakers,
+                                           segments: transcript.segments, attendeeNames: attendees)
         let corrected = try await correct(transcript.segments, speakers: speakers, context: context, kind: .wording)
         guard await WordingRevision.shared.isCurrent(ticket) else { return false }
         guard TranscriptSpeakers.preserved(original: transcript.segments, corrected: corrected) else {

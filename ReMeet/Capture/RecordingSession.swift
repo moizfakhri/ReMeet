@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreAudio
 import Foundation
 import ReMeetKit
 
@@ -21,12 +22,25 @@ final class RecordingSession {
     private var pendingSystemPeak: Float = 0
     private(set) var meta: MeetingMeta
     private var micRestartWork: DispatchWorkItem?
+    private var bluetoothSettleWork: DispatchWorkItem?
     private var systemRebuildWork: DispatchWorkItem?
     private var micRetryCount = 0
     private var isStopping = false
 
+    private let healthLock = NSLock()
+    private var _lastMicChunkUptime: Double = ProcessInfo.processInfo.systemUptime
+    private var _lastSystemChunkUptime: Double = ProcessInfo.processInfo.systemUptime
+    private(set) var micStartError: String?
+    private(set) var systemStartError: String?
+    private(set) var systemHasActiveTap = false
+    private(set) var currentMicDevice: AudioDeviceInfo?
+
+    /// Optional resolver returning an input device a meeting app (Zoom/Meet/Teams) already has open.
+    var preferredMicDeviceID: (() -> AudioDeviceID?)?
     /// Peak levels (0...1 linear) for mic and call, delivered on main roughly 20 times a second.
     var onLevels: ((Float, Float) -> Void)?
+    /// Fired on main whenever MicCapture binds/restarts onto an input device.
+    var onMicDeviceStarted: ((AudioDeviceInfo?) -> Void)?
     /// Every event that is also written to meta.json, delivered on main.
     var onEvent: ((SessionEvent) -> Void)?
     /// Audio could not be written (disk full ...), delivered on main once per track.
@@ -42,14 +56,20 @@ final class RecordingSession {
         }
     }
 
-    /// Seconds on the audio timeline (host clock, the same clock as both files). Unlike the
-    /// wall clock it does not advance while the Mac sleeps, so notes stay aligned (audit H3).
     var elapsedSeconds: Double {
         let now = mach_absolute_time()
         return now > startHostTime ? AVAudioTime.seconds(forHostTime: now - startHostTime) : 0
     }
 
+    var secondsSinceLastChunks: (mic: Double, system: Double) {
+        let now = ProcessInfo.processInfo.systemUptime
+        return healthLock.withLock {
+            (max(0, now - _lastMicChunkUptime), max(0, now - _lastSystemChunkUptime))
+        }
+    }
+
     init(folder: MeetingFolder, startDate: Date, title: String, titleIsUserSet: Bool = false, sourceApp: String?,
+         calendarEvent: CalendarMeeting? = nil,
          input: AudioDeviceInfo?, output: AudioDeviceInfo?) throws {
         self.folder = folder
         try FileManager.default.createDirectory(at: folder.url, withIntermediateDirectories: true)
@@ -62,19 +82,22 @@ final class RecordingSession {
         meta = MeetingMeta(title: title, status: .recording, startTime: startDate, startHostTime: startHostTime,
                            devices: .init(initialInput: input, initialOutput: output))
         meta.sourceApp = sourceApp
-        // A calendar event's name is kept; "Zoom call" and the like may be replaced by the summary.
+        if let calendarEvent {
+            meta.calendarEventID = calendarEvent.id
+            meta.calendarAttendees = calendarEvent.attendees
+            meta.calendarJoinURL = calendarEvent.joinURL?.absoluteString
+            meta.calendarName = calendarEvent.calendarName
+        }
         meta.titleIsUserSet = titleIsUserSet
         meta.clock = "Both files start at startHostTime (mach_absolute_time). Sample N of either file is startTime + N/48000 s."
     }
 
-    /// Renames the meeting while it is recording (the title field in the menu bar).
     func setTitle(_ title: String) {
         meta.title = title
         meta.titleIsUserSet = true
         writeMeta()
     }
 
-    /// Records the call app when a reminder- or shortcut-started recording joins the call.
     func setSourceAppIfUnset(_ bundleID: String) {
         guard meta.sourceApp == nil else { return }
         meta.sourceApp = bundleID
@@ -82,39 +105,46 @@ final class RecordingSession {
     }
 
     func start() throws {
+        let now = ProcessInfo.processInfo.systemUptime
+        healthLock.withLock {
+            _lastMicChunkUptime = now
+            _lastSystemChunkUptime = now
+        }
         startDrainTimer()
         micCapture.onConfigurationChange = { [weak self] in
             self?.log("mic_engine_configuration_change", "AVAudioEngine reported a configuration change")
             self?.scheduleMicRestart()
         }
-        // A mic that is not ready yet (AirPods mid-connect, no input) must not cost the whole
-        // recording: record the call and keep retrying the mic (audit C4).
-        var micError: String?
         do {
-            let mic = try micCapture.start()
+            let mic = try micCapture.start(preferredDeviceID: preferredMicDeviceID?())
+            micStartError = nil
+            currentMicDevice = mic.device
+            onMicDeviceStarted?(mic.device)
             log("mic_started", describe(mic))
+            if let id = mic.device?.id, CoreAudioUtil.isBluetooth(id) {
+                scheduleBluetoothSettleCheck()
+            }
         } catch {
-            micError = error.localizedDescription
+            micStartError = error.localizedDescription
             log("mic_start_failed", "\(error.localizedDescription); retrying")
             scheduleMicRestart(after: 1.0)
         }
-        var systemError: String?
         do {
             let system = try systemCapture.start()
+            systemStartError = nil
+            systemHasActiveTap = system.sampleRate > 0
             log("system_tap_started", "\(describe(system)), \(systemCapture.scopeDescription)")
         } catch {
-            systemError = "\(error)"
+            systemStartError = "\(error)"
+            systemHasActiveTap = false
             log("system_tap_failed", "\(error)")
         }
         writeMeta()
-        if let micError, let systemError {
-            throw SessionError.nothingToRecord("mic: \(micError); call audio: \(systemError)")
+        if let micErr = micStartError, let sysErr = systemStartError {
+            throw SessionError.nothingToRecord("mic: \(micErr); call audio: \(sysErr)")
         }
     }
 
-    /// The Mac is going to sleep / woke up. Devices go away during sleep; on wake the mic is
-    /// restarted and the tap rebuilt. The host clock (and so both files) skips the sleep.
-    /// A warning raised by the recorder (silent call track ...), kept in meta.json.
     func logWarning(_ type: String, _ detail: String) {
         guard !meta.events.contains(where: { $0.type == type }) else { return }
         log(type, detail)
@@ -127,30 +157,89 @@ final class RecordingSession {
     func systemDidWake() {
         guard !isStopping else { return }
         log("system_wake", "restarting mic and call capture")
+        let now = ProcessInfo.processInfo.systemUptime
+        healthLock.withLock {
+            _lastMicChunkUptime = now
+            _lastSystemChunkUptime = now
+        }
         micRetryCount = 0
         scheduleMicRestart(after: 1.0)
         scheduleSystemRebuild()
     }
 
-    /// "Meeting apps only": called before start() with the process objects to tap.
     func setProcessFilter(_ filter: @escaping () -> [AudioObjectID]) {
         systemCapture.processFilter = filter
     }
 
-    /// The set of meeting-app processes changed while recording (filter mode only).
+    /// Switches a running "meeting apps only" session to tap all call audio immediately.
+    func switchToAllAppsScope() {
+        guard !isStopping else { return }
+        systemCapture.processFilter = nil
+        do {
+            let info = try systemCapture.rebuildTap()
+            systemStartError = nil
+            systemHasActiveTap = info.sampleRate > 0
+            resetSystemWatchdog()
+            log("system_tap_switched_all_apps", describe(info))
+        } catch {
+            systemStartError = "\(error)"
+            log("system_tap_rescope_failed", "\(error)")
+        }
+    }
+
+    /// Manual or automatic full audio reconnect (rebuilds both MicCapture and SystemAudioCapture).
+    func forceReconnect() {
+        guard !isStopping else { return }
+        micRetryCount = 0
+        restartMic()
+        rebuildSystem()
+    }
+
+    /// Periodic 1 Hz watchdog check: recovers wedged Bluetooth HFP / Core Audio streams automatically.
+    func checkStreamLiveness() {
+        guard !isStopping, elapsedSeconds >= 4 else { return }
+        let gaps = secondsSinceLastChunks
+        if micStartError == nil, (!micCapture.isRunning || gaps.mic >= 4.2) {
+            log("mic_watchdog_restart", String(format: "no mic buffers for %.1f s; restarting", gaps.mic))
+            resetMicWatchdog()
+            scheduleMicRestart(after: 0.1)
+        }
+        if systemStartError == nil, systemHasActiveTap, gaps.system >= 4.8 {
+            log("system_watchdog_rebuild", String(format: "no call tap buffers for %.1f s; rebuilding", gaps.system))
+            resetSystemWatchdog()
+            scheduleSystemRebuild()
+        }
+    }
+
     func meetingProcessesChanged() {
         guard !isStopping, systemCapture.processFilter != nil else { return }
         do {
             let info = try systemCapture.rebuildTap()
+            systemStartError = nil
+            systemHasActiveTap = info.sampleRate > 0
+            resetSystemWatchdog()
             log("system_tap_rescoped", "\(describe(info)), \(systemCapture.scopeDescription)")
         } catch {
+            systemStartError = "\(error)"
             log("system_tap_rescope_failed", "\(error)")
         }
     }
 
     func defaultInputChanged(from old: AudioDeviceInfo?, to new: AudioDeviceInfo?) {
         log("default_input_changed", "\(old?.name ?? "none") -> \(new?.name ?? "none")")
-        scheduleMicRestart()
+        let isBT = new.map { CoreAudioUtil.isBluetooth($0.id) } ?? false
+        // Bluetooth headsets take slightly longer to finish SCO/BLE-Audio HFP negotiation.
+        scheduleMicRestart(after: isBT ? 0.45 : 0.3)
+        if isBT { scheduleBluetoothSettleCheck() }
+    }
+
+    /// Triggered when the active meeting app switches its own input device (e.g. inside Zoom's mic menu).
+    func preferredInputChanged(to new: AudioDeviceInfo) {
+        guard currentMicDevice?.id != new.id else { return }
+        log("call_app_mic_followed", "\(currentMicDevice?.name ?? "none") -> \(new.name)")
+        let isBT = CoreAudioUtil.isBluetooth(new.id)
+        scheduleMicRestart(after: isBT ? 0.45 : 0.25)
+        if isBT { scheduleBluetoothSettleCheck() }
     }
 
     func defaultOutputChanged(from old: AudioDeviceInfo?, to new: AudioDeviceInfo?) {
@@ -162,6 +251,7 @@ final class RecordingSession {
         guard !isStopping else { return }
         isStopping = true
         micRestartWork?.cancel()
+        bluetoothSettleWork?.cancel()
         systemRebuildWork?.cancel()
         micCapture.onConfigurationChange = nil
         micCapture.stop()
@@ -176,12 +266,11 @@ final class RecordingSession {
             let systemStats = systemWriter.finish(droppedChunks: systemQueue.droppedChunks)
             DispatchQueue.main.async { [self] in
                 meta.endTime = endDate
-                // The audio length, not the wall clock (which includes any sleep) (audit M1).
                 let written = max(micStats.durationSeconds, systemStats.durationSeconds)
                 meta.durationSeconds = written > 0 ? written : endDate.timeIntervalSince(startDate)
                 meta.mic = micStats
                 meta.system = systemStats
-                meta.devices.finalInput = input
+                meta.devices.finalInput = currentMicDevice ?? input
                 meta.devices.finalOutput = output
                 meta.status = .recorded
                 log("recording_stopped", String(format: "mic %.1f s, system %.1f s written",
@@ -191,10 +280,8 @@ final class RecordingSession {
         }
     }
 
-    // MARK: - Device changes
+    // MARK: - Device changes & Bluetooth Settle
 
-    /// Debounced so that the engine notification and the default-device notification
-    /// for the same AirPods switch cause one restart, about 0.3 s after the change.
     private func scheduleMicRestart(after delay: TimeInterval = 0.3) {
         guard !isStopping else { return }
         micRestartWork?.cancel()
@@ -203,18 +290,42 @@ final class RecordingSession {
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
+    /// AirPods often report 48 kHz A2DP for ~0.5–1.5s before dropping to 24 kHz / 16 kHz HFP.
+    /// Re-verify sample rate & chunk flow 1.6s after a Bluetooth switch.
+    private func scheduleBluetoothSettleCheck() {
+        bluetoothSettleWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.isStopping else { return }
+            let gaps = self.secondsSinceLastChunks
+            if let dev = self.currentMicDevice {
+                let liveRate = CoreAudioUtil.double(dev.id, kAudioDevicePropertyNominalSampleRate) ?? dev.nominalSampleRate
+                if (liveRate > 0 && abs(liveRate - dev.nominalSampleRate) > 100) || gaps.mic >= 1.2 || !self.micCapture.isRunning {
+                    self.log("bluetooth_hfp_settle_restart", "re-syncing AirPods/Bluetooth stream (\(Int(dev.nominalSampleRate)) -> \(Int(liveRate)) Hz)")
+                    self.restartMic()
+                    self.rebuildSystem()
+                }
+            }
+        }
+        bluetoothSettleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6, execute: work)
+    }
+
     private func restartMic() {
         guard !isStopping else { return }
         do {
-            let info = try micCapture.start()
+            let info = try micCapture.start(preferredDeviceID: preferredMicDeviceID?())
             micRetryCount = 0
+            micStartError = nil
+            currentMicDevice = info.device
+            resetMicWatchdog()
+            onMicDeviceStarted?(info.device)
             log("mic_restarted", describe(info))
         } catch {
             micRetryCount += 1
+            micStartError = error.localizedDescription
             if micRetryCount <= 10 || micRetryCount % 30 == 0 {
                 log("mic_restart_failed", "attempt \(micRetryCount): \(error.localizedDescription)")
             }
-            // Every second at first, then every 10 s for as long as the recording runs.
             scheduleMicRestart(after: micRetryCount < 10 ? 1.0 : 10.0)
         }
     }
@@ -224,17 +335,32 @@ final class RecordingSession {
         systemRebuildWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.rebuildSystem() }
         systemRebuildWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
     }
 
     private func rebuildSystem() {
         guard !isStopping else { return }
         do {
             let info = try systemCapture.rebuild()
+            systemStartError = nil
+            systemHasActiveTap = info.sampleRate > 0
+            resetSystemWatchdog()
             log("system_tap_rebuilt", describe(info))
         } catch {
+            systemStartError = "\(error)"
+            systemHasActiveTap = false
             log("system_tap_rebuild_failed", "\(error)")
         }
+    }
+
+    private func resetMicWatchdog() {
+        let now = ProcessInfo.processInfo.systemUptime
+        healthLock.withLock { _lastMicChunkUptime = now }
+    }
+
+    private func resetSystemWatchdog() {
+        let now = ProcessInfo.processInfo.systemUptime
+        healthLock.withLock { _lastSystemChunkUptime = now }
     }
 
     // MARK: - Writer queue
@@ -248,8 +374,23 @@ final class RecordingSession {
     }
 
     private func drain() {
-        micQueue.drain { pendingMicPeak = max(pendingMicPeak, micWriter.append($0)) }
-        systemQueue.drain { pendingSystemPeak = max(pendingSystemPeak, systemWriter.append($0)) }
+        var sawMic = false
+        var sawSystem = false
+        micQueue.drain {
+            sawMic = true
+            pendingMicPeak = max(pendingMicPeak, micWriter.append($0))
+        }
+        systemQueue.drain {
+            sawSystem = true
+            pendingSystemPeak = max(pendingSystemPeak, systemWriter.append($0))
+        }
+        if sawMic || sawSystem {
+            let uptime = ProcessInfo.processInfo.systemUptime
+            healthLock.withLock {
+                if sawMic { _lastMicChunkUptime = uptime }
+                if sawSystem { _lastSystemChunkUptime = uptime }
+            }
+        }
         for writer in [micWriter, systemWriter] where writer.writeFailures > 0 {
             let name = writer.stats.fileName, message = writer.lastWriteError ?? "unknown error"
             DispatchQueue.main.async { [weak self] in

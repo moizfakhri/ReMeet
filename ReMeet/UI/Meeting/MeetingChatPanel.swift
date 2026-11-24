@@ -9,6 +9,7 @@ struct MeetingChatPanel: View {
     let document: MeetingDocument
     let player: PlayerModel
     @Binding var showTranscript: Bool
+    var compact = false
 
     @State private var scope: MeetingChatScope = .thisMeeting
     @State private var question = ""
@@ -100,52 +101,33 @@ struct MeetingChatPanel: View {
                     .font(.caption)
                     .foregroundStyle(Theme.fg2)
             }
-            HStack(spacing: 8) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(Theme.accent)
-                TextField("Ask about decisions, action items, or what someone said… (⌘L)", text: $question, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13.5))
-                    .foregroundStyle(Theme.fg)
-                    .lineLimit(1...4)
-                    .focused($focused)
-                    .disabled(!canAsk || loading)
-                    .onSubmit { if canAsk { submit() } }
-                if !isExpanded {
-                    Menu {
-                        ForEach(availableScopes) { value in
-                            Button {
-                                scope = value
-                            } label: {
-                                if scope == value {
-                                    Label(value.label, systemImage: "checkmark")
-                                } else {
-                                    Text(value.label)
-                                }
-                            }
-                        }
-                    } label: {
-                        Text(scope.label)
-                            .font(.system(size: 11.5, weight: .medium))
-                            .foregroundStyle(Theme.fg2)
+            if compact {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(Theme.accent)
+                        promptField
                     }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    .help("Choose whether to search this meeting, this folder, or all recordings")
+                    HStack(spacing: 8) {
+                        if !isExpanded {
+                            scopeMenu
+                        }
+                        Spacer()
+                        askButton
+                    }
                 }
-                Button {
-                    loading ? cancel() : submit()
-                } label: {
-                    Text(loading ? "Stop" : "Ask")
-                        .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(canSubmit ? Color.white : Theme.fg3)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 5)
-                        .background(canSubmit ? Theme.accentFill : Theme.line.opacity(0.6), in: Capsule())
+            } else {
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(Theme.accent)
+                    promptField
+                    if !isExpanded {
+                        scopeMenu
+                    }
+                    askButton
                 }
-                .buttonStyle(.plain)
-                .disabled(!canSubmit)
             }
         }
         .padding(.horizontal, 14)
@@ -176,6 +158,55 @@ struct MeetingChatPanel: View {
         .onDisappear {
             cancel()
         }
+    }
+
+    private var promptField: some View {
+        TextField("Ask about this meeting… (⌘L)", text: $question, axis: .vertical)
+            .textFieldStyle(.plain)
+            .font(.system(size: 13.5))
+            .foregroundStyle(Theme.fg)
+            .lineLimit(1...4)
+            .focused($focused)
+            .disabled(!canAsk || loading)
+            .onSubmit { if canAsk { submit() } }
+    }
+
+    private var scopeMenu: some View {
+        Menu {
+            ForEach(availableScopes) { value in
+                Button {
+                    scope = value
+                } label: {
+                    if scope == value {
+                        Label(value.label, systemImage: "checkmark")
+                    } else {
+                        Text(value.label)
+                    }
+                }
+            }
+        } label: {
+            Text(scope.label)
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(Theme.fg2)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Choose whether to search this meeting, this folder, or all recordings")
+    }
+
+    private var askButton: some View {
+        Button {
+            loading ? cancel() : submit()
+        } label: {
+            Text(loading ? "Stop" : "Ask")
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(canSubmit ? Color.white : Theme.fg3)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(canSubmit ? Theme.accentFill : Theme.line.opacity(0.6), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(!canSubmit)
     }
 
     private var emptyMessage: String {
@@ -291,7 +322,7 @@ struct MeetingChatPanel: View {
 
     @ViewBuilder
     private func SourcePills(sources: [MeetingChatSource], titles: [String: String]) -> some View {
-        FlowLayout(spacing: 6) {
+        WrappingFlowLayout(spacing: 6, lineSpacing: 6) {
             ForEach(sources) { source in
                 let title = titles[source.meetingID] ?? source.meetingID
                 Button {
@@ -316,46 +347,6 @@ struct MeetingChatPanel: View {
         } else {
             model.openCitation(meetingID: source.meetingID, start: source.start,
                                switchingFrom: document.folder.id)
-        }
-    }
-}
-
-/// Simple left-to-right wrap for source pills.
-private struct FlowLayout: Layout {
-    var spacing: CGFloat = 8
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let width = proposal.width ?? 0
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var rowHeight: CGFloat = 0
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x + size.width > width, x > 0 {
-                x = 0
-                y += rowHeight + spacing
-                rowHeight = 0
-            }
-            rowHeight = max(rowHeight, size.height)
-            x += size.width + spacing
-        }
-        return CGSize(width: width, height: y + rowHeight)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        var x = bounds.minX
-        var y = bounds.minY
-        var rowHeight: CGFloat = 0
-        for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
-            if x + size.width > bounds.maxX, x > bounds.minX {
-                x = bounds.minX
-                y += rowHeight + spacing
-                rowHeight = 0
-            }
-            subview.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
-            rowHeight = max(rowHeight, size.height)
-            x += size.width + spacing
         }
     }
 }

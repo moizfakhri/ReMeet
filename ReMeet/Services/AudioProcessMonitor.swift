@@ -17,15 +17,18 @@ final class AudioProcessMonitor {
     var onInputChange: ((Set<String>) -> Void)?
     /// An audio process appeared or went away (apps launched or quit).
     var onProcessListChange: (() -> Void)?
+    /// Fired when any input device starts or stops running (e.g. Zoom switches onto AirPods mid-call).
+    var onInputDeviceActivity: (() -> Void)?
 
     private let queue = DispatchQueue(label: "com.moizfakhri.ReMeet.audioProcessMonitor", qos: .utility)
     private var listListener: AudioObjectPropertyListenerBlock?
     private var processListeners: [AudioObjectID: AudioObjectPropertyListenerBlock] = [:]
     /// The per-process "running input" notification is not delivered reliably on macOS 27
-    /// (measured by `--selftest processmonitor`), so the default input device's
-    /// "running somewhere" flag, which flips whenever any app starts or stops capturing,
-    /// is watched as well. Still event-driven: no polling.
-    private var deviceListener: (AudioObjectID, AudioObjectPropertyListenerBlock)?
+    /// (measured by `--selftest processmonitor`), so every input-capable device's
+    /// "running somewhere" flag (including AirPods when selected inside Zoom while MacBook Mic
+    /// remains system default) is watched as well. Still event-driven: no polling.
+    private var deviceListeners: [AudioObjectID: AudioObjectPropertyListenerBlock] = [:]
+    private var hardwareDevicesListener: AudioObjectPropertyListenerBlock?
     private var defaultInputListener: AudioObjectPropertyListenerBlock?
     private var lastReported: Set<String> = []
     private var started = false
@@ -49,41 +52,65 @@ final class AudioProcessMonitor {
             listListener = block
         }
         var defaultAddress = CoreAudioUtil.address(kAudioHardwarePropertyDefaultInputDevice)
-        let defaultBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.watchDefaultInput() }
+        let defaultBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.watchInputDevices() }
         if AudioObjectAddPropertyListenerBlock(CoreAudioUtil.systemObject, &defaultAddress, queue, defaultBlock) == noErr {
             defaultInputListener = defaultBlock
         }
-        watchDefaultInput()
+        var devicesAddress = CoreAudioUtil.address(kAudioHardwarePropertyDevices)
+        let devicesBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.watchInputDevices() }
+        if AudioObjectAddPropertyListenerBlock(CoreAudioUtil.systemObject, &devicesAddress, queue, devicesBlock) == noErr {
+            hardwareDevicesListener = devicesBlock
+        }
+        watchInputDevices()
         processListChanged()
     }
 
-    private func watchDefaultInput() {
-        if let (device, block) = deviceListener {
+    private func watchInputDevices() {
+        var desired = Set(CoreAudioUtil.allInputDevices())
+        if let def = CoreAudioUtil.defaultInputDevice() { desired.insert(def) }
+
+        for device in desired where deviceListeners[device] == nil {
             var address = CoreAudioUtil.address(kAudioDevicePropertyDeviceIsRunningSomewhere)
-            AudioObjectRemovePropertyListenerBlock(device, &address, queue, block)
-            deviceListener = nil
+            let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                self?.report()
+                self?.notifyDeviceActivity()
+                // The device flips before the process flags settle; read again shortly after.
+                self?.queue.asyncAfter(deadline: .now() + 0.35) {
+                    self?.report()
+                    self?.notifyDeviceActivity()
+                }
+            }
+            if AudioObjectAddPropertyListenerBlock(device, &address, queue, block) == noErr {
+                deviceListeners[device] = block
+            }
         }
-        guard let device = CoreAudioUtil.defaultInputDevice() else { return }
-        var address = CoreAudioUtil.address(kAudioDevicePropertyDeviceIsRunningSomewhere)
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            // The device flips before the process flags settle; read again shortly after.
-            self?.report()
-            self?.queue.asyncAfter(deadline: .now() + 0.3) { self?.report() }
-        }
-        if AudioObjectAddPropertyListenerBlock(device, &address, queue, block) == noErr {
-            deviceListener = (device, block)
+        for device in Array(deviceListeners.keys) where !desired.contains(device) {
+            if let block = deviceListeners.removeValue(forKey: device) {
+                var address = CoreAudioUtil.address(kAudioDevicePropertyDeviceIsRunningSomewhere)
+                AudioObjectRemovePropertyListenerBlock(device, &address, queue, block)
+            }
         }
         report()
+    }
+
+    private func notifyDeviceActivity() {
+        guard let callback = onInputDeviceActivity else { return }
+        DispatchQueue.main.async { callback() }
     }
 
     func stop() {
         let tearDown = {
             self.started = false
-            if let (device, block) = self.deviceListener {
+            for (device, block) in self.deviceListeners {
                 var address = CoreAudioUtil.address(kAudioDevicePropertyDeviceIsRunningSomewhere)
                 AudioObjectRemovePropertyListenerBlock(device, &address, self.queue, block)
             }
-            self.deviceListener = nil
+            self.deviceListeners = [:]
+            if let hardwareDevicesListener = self.hardwareDevicesListener {
+                var address = CoreAudioUtil.address(kAudioHardwarePropertyDevices)
+                AudioObjectRemovePropertyListenerBlock(CoreAudioUtil.systemObject, &address, self.queue, hardwareDevicesListener)
+            }
+            self.hardwareDevicesListener = nil
             if let defaultInputListener = self.defaultInputListener {
                 var address = CoreAudioUtil.address(kAudioHardwarePropertyDefaultInputDevice)
                 AudioObjectRemovePropertyListenerBlock(CoreAudioUtil.systemObject, &address, self.queue, defaultInputListener)

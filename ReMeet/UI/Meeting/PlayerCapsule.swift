@@ -20,20 +20,16 @@ struct PlayerCapsule: View {
                     Image(systemName: "waveform.slash")
                         .font(.system(size: 12))
                         .foregroundStyle(Theme.fg3)
-                    Text("No audio on disk")
+                    Text("Audio unavailable")
                         .font(.system(size: 12.5, weight: .medium))
                         .foregroundStyle(Theme.fg2)
-                    Text("·")
-                        .foregroundStyle(Theme.fg3)
-                    Text("Removed by Keep audio, or never recorded")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.fg3)
                         .lineLimit(1)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 9)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .help("Audio file was removed by Keep audio setting or never recorded")
             } else {
-                HStack(spacing: 12) {
+                HStack(spacing: 8) {
                     Button { player.skip(-15) } label: {
                         Image(systemName: "gobackward.15")
                             .frame(width: 22, height: 22)
@@ -63,7 +59,7 @@ struct PlayerCapsule: View {
                     Text(TimeFormat.clock(scrubbing ?? player.currentTime))
                         .font(Fonts.monoSmall)
                         .foregroundStyle(Theme.fg2)
-                        .frame(minWidth: 42, alignment: .trailing)
+                        .frame(minWidth: 36, alignment: .trailing)
 
                     Scrubber(value: scrubbing ?? player.currentTime, duration: player.duration, ticks: notes.map(\.t)) { value, ended in
                         if ended {
@@ -73,12 +69,13 @@ struct PlayerCapsule: View {
                             scrubbing = value
                         }
                     }
+                    .frame(minWidth: 60, maxWidth: .infinity)
                     .frame(height: 22)
 
                     Text(TimeFormat.clock(player.duration))
                         .font(Fonts.monoSmall)
                         .foregroundStyle(Theme.fg2)
-                        .frame(minWidth: 42, alignment: .leading)
+                        .frame(minWidth: 36, alignment: .leading)
 
                     Button {
                         let speeds = PlayerModel.speeds
@@ -97,9 +94,9 @@ struct PlayerCapsule: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(Theme.fg)
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 12)
                 .padding(.vertical, 8)
-                .frame(maxWidth: 600)
+                .frame(maxWidth: 560)
                 .disabled(!player.isAvailable)
                 .opacity(player.audioMissing ? 0.6 : 1)
                 .animation(nil, value: player.audioMissing)

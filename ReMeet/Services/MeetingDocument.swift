@@ -32,6 +32,9 @@ final class MeetingDocument {
     private(set) var callSpeakers: [String] = []
     private(set) var speakerClips: [String: ClipRange] = [:]
     private(set) var speakerAlike: [String: SpeakerLikeness.Pair] = [:]
+    private(set) var savedMoments = SavedMoments()
+    private(set) var moments: [KeyMoment] = []
+    private(set) var pulse: ConversationPulse = .empty
 
     /// Everything read from disk for one meeting. Built off the main thread.
     struct Contents: Sendable {
@@ -41,6 +44,7 @@ final class MeetingDocument {
         var transcript: Transcript?
         var speakers: SpeakerNames
         var diarization: Diarization?
+        var savedMoments: SavedMoments = SavedMoments()
         var error: String?
         var wordCount: Int = 0
         var originalAudioURLs: [URL] = []
@@ -50,10 +54,17 @@ final class MeetingDocument {
         var callSpeakers: [String] = []
         var speakerClips: [String: ClipRange] = [:]
         var speakerAlike: [String: SpeakerLikeness.Pair] = [:]
+        var moments: [KeyMoment] = []
+        var pulse: ConversationPulse = .empty
 
         static func read(_ folder: MeetingFolder) -> Contents? {
             guard let meta = try? folder.readMeta() else { return nil }
-            var contents = Contents(meta: meta, notes: NotesFile(url: folder.file(.notes)).load(), speakers: SpeakerNames())
+            var contents = Contents(
+                meta: meta,
+                notes: NotesFile(url: folder.file(.notes)).load(),
+                speakers: SpeakerNames(),
+                savedMoments: MomentsFile(url: folder.file(.moments)).load()
+            )
             do {
                 contents.summary = try folder.read(MeetingSummary.self, .summary)
                 contents.transcript = try folder.read(Transcript.self, .transcript)
@@ -89,6 +100,10 @@ final class MeetingDocument {
             speakerClips = clips
             let pairs = SpeakerLikeness.pairs(diarization?.embeddings ?? [:], order: seen)
             speakerAlike = Dictionary(uniqueKeysWithValues: pairs.map { ($0.source, $0) })
+            moments = KeyMomentsBuilder.build(meta: meta, summary: summary, transcript: transcript,
+                                              notes: notes, speakers: speakers, saved: savedMoments)
+            pulse = ConversationPulse.compute(transcript: transcript, speakers: speakers,
+                                              metaDuration: meta.effectiveDuration)
         }
     }
 
@@ -135,6 +150,16 @@ final class MeetingDocument {
         callSpeakers = contents.callSpeakers
         speakerClips = contents.speakerClips
         speakerAlike = contents.speakerAlike
+        savedMoments = contents.savedMoments
+        moments = contents.moments
+        pulse = contents.pulse
+    }
+
+    private func recomputeMomentsAndPulse() {
+        moments = KeyMomentsBuilder.build(meta: meta, summary: summary, transcript: transcript,
+                                          notes: notes, speakers: speakers, saved: savedMoments)
+        pulse = ConversationPulse.compute(transcript: transcript, speakers: speakers,
+                                          metaDuration: meta.effectiveDuration)
     }
 
     private func recomputeSpeakersDerived() {
@@ -153,6 +178,7 @@ final class MeetingDocument {
         speakerClips = clips
         let pairs = SpeakerLikeness.pairs(diarization?.embeddings ?? [:], order: seen)
         speakerAlike = Dictionary(uniqueKeysWithValues: pairs.map { ($0.source, $0) })
+        recomputeMomentsAndPulse()
     }
 
     func rename(_ title: String) {
@@ -190,7 +216,21 @@ final class MeetingDocument {
         writeSummaryMarkdown()
     }
 
+    func updateActionItem(_ item: ActionItem,
+                          owner: String?? = nil,
+                          relatesToMe: Bool?? = nil,
+                          dismissed: Bool? = nil) {
+        guard var summary, let index = summary.actionItems.firstIndex(of: item) else { return }
+        if let owner { summary.actionItems[index].owner = owner }
+        if let relatesToMe { summary.actionItems[index].relatesToMe = relatesToMe }
+        if let dismissed { summary.actionItems[index].dismissed = dismissed }
+        self.summary = summary
+        try? folder.write(summary, .summary)
+        writeSummaryMarkdown()
+    }
+
     /// Renames one voice in this meeting. Other speaker ids are not touched.
+    /// Clearing or resetting to a placeholder also unlearns this meeting speaker's voiceprint contribution.
     func renameSpeaker(_ id: String, to name: String) {
         let old = speakers.displayName(for: id)
         let updated = speakers.renaming(id, to: name)
@@ -208,7 +248,68 @@ final class MeetingDocument {
             writeSummaryMarkdown()
         }
         writeTranscriptMarkdown()
-        rememberVoice(id, name: trimmed)
+        recomputeMomentsAndPulse()
+        if SpeakerMemory.isPlaceholder(trimmed) {
+            unlearnVoice(id)
+        } else {
+            rememberVoice(id, name: trimmed)
+        }
+    }
+
+    func clearSpeakerName(_ id: String) {
+        renameSpeaker(id, to: "")
+    }
+
+    /// Reassigns specific transcript segments (e.g. a misattributed turn) to another speaker ID
+    /// without altering global voiceprints.
+    func reassignSegments(at indices: IndexSet, toSpeakerID targetID: String) {
+        guard var transcript, !indices.isEmpty else { return }
+        var changed = false
+        for i in indices where transcript.segments.indices.contains(i) {
+            if transcript.segments[i].speaker != targetID {
+                transcript.segments[i].speaker = targetID
+                changed = true
+            }
+        }
+        guard changed else { return }
+        self.transcript = transcript
+        try? folder.write(transcript, .transcript)
+        writeTranscriptMarkdown()
+        recomputeSpeakersDerived()
+    }
+
+    /// Splits selected transcript segments out into a new `speaker_N` ID when the diarizer
+    /// merged two voices together.
+    @discardableResult
+    func splitSegmentsToNewSpeaker(at indices: IndexSet, named rawName: String) -> String? {
+        guard var transcript, !indices.isEmpty else { return nil }
+        let allIDs = Set(transcript.segments.map(\.speaker)).union(speakers.names.keys)
+        var maxNum = 0
+        for id in allIDs where id.hasPrefix("speaker_") {
+            if let n = Int(id.dropFirst("speaker_".count)) {
+                maxNum = max(maxNum, n)
+            }
+        }
+        let newID = "speaker_\(maxNum + 1)"
+        var changed = false
+        for i in indices where transcript.segments.indices.contains(i) {
+            transcript.segments[i].speaker = newID
+            changed = true
+        }
+        guard changed else { return nil }
+
+        self.transcript = transcript
+        try? folder.write(transcript, .transcript)
+
+        let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !SpeakerMemory.isPlaceholder(trimmed) {
+            speakers = speakers.renaming(newID, to: trimmed)
+            try? folder.write(speakers, .speakers)
+            upsertPersonProfile(name: trimmed)
+        }
+        writeTranscriptMarkdown()
+        recomputeSpeakersDerived()
+        return newID
     }
 
     /// Makes every turn of `source` belong to `target`. Other voices are left alone.
@@ -242,7 +343,7 @@ final class MeetingDocument {
 
     /// How many voices to find on the call, besides you. Nil is automatic.
     func setExpectedCallSpeakers(_ count: Int?) {
-        let clamped = count.flatMap { (1...8).contains($0) ? $0 : nil }
+        let clamped = count.flatMap { (1...12).contains($0) ? $0 : nil }
         if let updated = try? folder.updateMeta({ $0.expectedCallSpeakers = clamped }) { meta = updated }
     }
 
@@ -253,15 +354,41 @@ final class MeetingDocument {
         }
     }
 
+    private func upsertPersonProfile(name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !SpeakerMemory.isPlaceholder(trimmed) else { return }
+        let meetingsDir = folder.url.deletingLastPathComponent()
+        let peopleURL = PeopleFile.url(beside: meetingsDir)
+        var store = PeopleFile.load(peopleURL)
+        let matchingAttendee = meta.calendarAttendees.first { SpeakerMemory.namesMatch($0.name, trimmed) }
+        _ = store.upsert(
+            name: trimmed,
+            email: matchingAttendee?.email,
+            organization: matchingAttendee?.inferredOrganization
+        )
+        try? PeopleFile.save(store, to: peopleURL)
+    }
+
     private func rememberVoice(_ id: String, name: String) {
-        guard !SpeakerMemory.isPlaceholder(name),
-              let diarization = try? folder.read(Diarization.self, .diarization),
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !SpeakerMemory.isPlaceholder(trimmed) else { return }
+
+        upsertPersonProfile(name: trimmed)
+
+        guard let diarization = try? folder.read(Diarization.self, .diarization),
               let embedding = diarization.embeddings[id], !embedding.isEmpty else { return }
         let stretches = id == SpeakerNames.youID ? diarization.mic : diarization.system
         let seconds = stretches.filter { $0.speaker == id }.reduce(0) { $0 + $1.duration }
         let url = SpeakerMemoryFile.url(beside: folder)
         var memory = SpeakerMemoryFile.load(url)
-        memory.remember(name: name, embedding: embedding, seconds: seconds)
+        memory.remember(name: trimmed, embedding: embedding, seconds: seconds, sourceKey: "\(folder.id)::\(id)")
+        try? SpeakerMemoryFile.save(memory, to: url)
+    }
+
+    private func unlearnVoice(_ id: String) {
+        let url = SpeakerMemoryFile.url(beside: folder)
+        var memory = SpeakerMemoryFile.load(url)
+        memory.unlearn(sourceKey: "\(folder.id)::\(id)")
         try? SpeakerMemoryFile.save(memory, to: url)
     }
 
@@ -270,8 +397,68 @@ final class MeetingDocument {
         self.notes = sorted
         try? NotesFile(url: folder.file(.notes)).save(sorted)
         if summary != nil { notesChangedSinceSummary = true }
+        recomputeMomentsAndPulse()
         writeTranscriptMarkdown()
         writeSummaryMarkdown()
+    }
+
+    // MARK: - Key Moments & Calendar Linkage
+
+    func addCustomMoment(title: String, kind: KeyMoment.Kind = .pinned, startTime: Double, endTime: Double? = nil) {
+        var next = savedMoments
+        next.custom.append(SavedMoments.CustomMoment(
+            kind: kind,
+            title: title.trimmingCharacters(in: .whitespacesAndNewlines),
+            startTime: startTime,
+            endTime: endTime
+        ))
+        persistMoments(next)
+    }
+
+    func toggleMomentStar(_ id: String) {
+        var next = savedMoments
+        if next.starredIDs.contains(id) {
+            next.starredIDs.remove(id)
+        } else {
+            next.starredIDs.insert(id)
+        }
+        persistMoments(next)
+    }
+
+    func hideMoment(_ id: String) {
+        var next = savedMoments
+        if id.hasPrefix("custom:") {
+            let rawID = String(id.dropFirst("custom:".count))
+            next.custom.removeAll { $0.id == rawID }
+        } else {
+            next.hiddenIDs.insert(id)
+        }
+        persistMoments(next)
+    }
+
+    func renameMoment(_ id: String, to newTitle: String) {
+        let trimmed = newTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var next = savedMoments
+        next.renamedTitles[id] = trimmed
+        persistMoments(next)
+    }
+
+    private func persistMoments(_ next: SavedMoments) {
+        savedMoments = next
+        try? MomentsFile(url: folder.file(.moments)).save(next)
+        recomputeMomentsAndPulse()
+    }
+
+    func linkCalendarEvent(_ event: CalendarMeeting) {
+        if let updated = try? folder.updateMeta({
+            $0.calendarEventID = event.id
+            $0.calendarAttendees = event.attendees
+            $0.calendarJoinURL = event.joinURL?.absoluteString
+            $0.calendarName = event.calendarName
+        }) {
+            meta = updated
+        }
     }
 
     private func writeTranscriptMarkdown() {

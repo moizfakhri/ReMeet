@@ -1,15 +1,15 @@
+import AudioToolbox
 import AVFoundation
+import CoreAudio
 import ReMeetKit
 
-/// Captures the current system default input device with AVAudioEngine.
+/// Captures the active microphone with AVAudioEngine.
 ///
-/// ReMeet never selects a device itself: forcing AirPods (or any headset) to become the
-/// input would switch them into call mode. On a device or configuration change the
-/// session tears this down and calls `start()` again, which picks up the new default.
-///
-/// Capture only: the tap sits on `inputNode` and the main mixer is muted so mic audio
-/// cannot route to the speakers (no monitoring / feedback), even if a future graph
-/// change reconnects input to the mixer.
+/// ReMeet never forces an idle Bluetooth headset into call mode on its own: by default it
+/// opens macOS's system default input. However, when a meeting app (Zoom, Meet, Teams) is
+/// ALREADY actively capturing from another input device (e.g. AirPods selected inside Zoom's
+/// mic menu while macOS Default Input stayed on MacBook Mic), `preferredDeviceID` lets ReMeet
+/// bind to that already-active input device so the user's voice is never missed.
 final class MicCapture {
     struct StartInfo {
         var device: AudioDeviceInfo?
@@ -28,10 +28,34 @@ final class MicCapture {
         self.queue = queue
     }
 
-    func start() throws -> StartInfo {
+    func start(preferredDeviceID: AudioDeviceID? = nil) throws -> StartInfo {
+        if let preferredDeviceID,
+           preferredDeviceID != CoreAudioUtil.defaultInputDevice(),
+           let info = try? startEngine(bindingTo: preferredDeviceID) {
+            return info
+        }
+        return try startEngine(bindingTo: nil)
+    }
+
+    private func startEngine(bindingTo explicitDeviceID: AudioDeviceID?) throws -> StartInfo {
         stop()
         let engine = AVAudioEngine()
         let input = engine.inputNode
+
+        if var deviceID = explicitDeviceID, let audioUnit = input.audioUnit {
+            let status = AudioUnitSetProperty(
+                audioUnit,
+                kAudioOutputUnitProperty_CurrentDevice,
+                kAudioUnitScope_Global,
+                0,
+                &deviceID,
+                UInt32(MemoryLayout<AudioDeviceID>.size)
+            )
+            if status != noErr {
+                throw CoreAudioError(operation: "Bind input AudioUnit to call mic", status: status)
+            }
+        }
+
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw NSError(domain: "ReMeet", code: 1,
@@ -42,8 +66,7 @@ final class MicCapture {
                           userInfo: [NSLocalizedDescriptionKey: "Unexpected mic sample format \(format)"])
         }
 
-        // Silence any path from the engine to the default output (clicks of opening the
-        // device still happen; audible mic monitoring must not).
+        // Silence any path from the engine to the default output so audible mic monitoring cannot occur.
         engine.mainMixerNode.outputVolume = 0
 
         let raw = queue.raw
@@ -73,8 +96,16 @@ final class MicCapture {
         }
         self.engine = engine
 
-        let device = CoreAudioUtil.defaultInputDevice().map(CoreAudioUtil.deviceInfo)
+        let resolvedID = explicitDeviceID ?? CoreAudioUtil.defaultInputDevice()
+        var device = resolvedID.map(CoreAudioUtil.deviceInfo)
+        if device != nil, rate > 0 {
+            device?.nominalSampleRate = rate
+        }
         return StartInfo(device: device, sampleRate: rate, channels: channels)
+    }
+
+    var isRunning: Bool {
+        engine?.isRunning == true
     }
 
     func stop() {

@@ -57,6 +57,16 @@ final class TrackWriter {
         var hostTime = chunk.hostTime
         let rate = chunk.sampleRate
 
+        // Guard against bogus Bluetooth HFP / USB driver timestamps far in the future,
+        // which would otherwise cause `writeSilence` to pad multi-minute silence blocks.
+        let nowHost = mach_absolute_time()
+        if hostTime > nowHost {
+            let aheadSeconds = AVAudioTime.seconds(forHostTime: hostTime - nowHost)
+            if aheadSeconds > 0.5 {
+                hostTime = nowHost
+            }
+        }
+
         if hostTime < startHostTime {
             let skip = Int((AVAudioTime.seconds(forHostTime: startHostTime - hostTime) * rate).rounded(.up))
             guard skip < frames else { return 0 }
@@ -119,7 +129,7 @@ final class TrackWriter {
         }
         converter = AVAudioConverter(from: inputFormat, to: outputFormat)
         converter?.sampleRateConverterQuality = AVAudioQuality.high.rawValue
-        inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: 4_096)
+        inputBuffer = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: 8_192)
     }
 
     /// Returns the chunk at 48 kHz in `outputBuffer` (or nil if conversion failed).

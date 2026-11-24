@@ -132,7 +132,7 @@ struct DiarizeRunner: StageRunner {
             let expected = (try? folder.readMeta())?.expectedCallSpeakers
             var config = OfflineDiarizerConfig.default
             config.postProcessing.exclusiveSegments = true
-            if let expected, (1...8).contains(expected) {
+            if let expected, (1...12).contains(expected) {
                 config = config.withSpeakers(exactly: expected)
             }
             let manager = OfflineDiarizerManager(config: config)
@@ -434,7 +434,9 @@ struct TranscribeRunner: StageRunner {
         if PipelineStop.isRequested(folder.id) { throw CancellationError() }
         if useSonnet, hasWords {
             do {
-                let context = NameGlossary.context(recorderName: recorderName(), speakers: speakers, segments: segments)
+                let attendees = ((try? folder.readMeta().calendarAttendees) ?? []).filter { $0.status != .declined }.map(\.name)
+                let context = NameGlossary.context(recorderName: recorderName(), speakers: speakers,
+                                                   segments: segments, attendeeNames: attendees)
                 let corrected = try await ClaudeSonnet.correct(segments, speakers: speakers, context: context)
                 if PipelineStop.isRequested(folder.id) { throw CancellationError() }
                 if TranscriptSpeakers.preserved(original: segments, corrected: corrected) {

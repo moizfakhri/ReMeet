@@ -5,11 +5,14 @@ import ReMeetKit
 /// ~/ReMeet). Content mirrors the design mockups.
 @MainActor
 enum SampleData {
-    static let root = FileManager.default.temporaryDirectory.appendingPathComponent("remeet-sample", isDirectory: true)
+    static let baseRoot = FileManager.default.temporaryDirectory.appendingPathComponent("remeet-sample", isDirectory: true)
+    static let root = baseRoot.appendingPathComponent("meetings", isDirectory: true)
 
     static func install(model: AppModel, select index: Int) {
         if !FileManager.default.fileExists(atPath: root.path) { write() }
+        writeSamplePeopleAndCalendar(model: model)
         model.library.root = root
+        model.hub.configure(root: root)
         model.library.reloadNow()
         if model.library.collections.isEmpty, let first = model.library.items.first {
             let product = model.library.createCollection(named: "Product team")
@@ -20,8 +23,72 @@ enum SampleData {
             }
             model.library.reloadNow()
         }
+        model.hub.reloadAll(items: model.library.items, calendarEvents: model.calendar.events, recorderName: AppModel.recorderName)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.18))
         let folders = model.library.items.map(\.folder)
-        if index < folders.count { model.selectedMeeting = folders[index] }
+        if index >= 0, index < folders.count { model.selectedMeeting = folders[index] }
+    }
+
+    private static func writeSamplePeopleAndCalendar(model: AppModel) {
+        let peopleURL = PeopleFile.url(beside: root)
+        var store = PeopleStore()
+        _ = store.upsert(name: "Priya Patel", email: "priya@acme.io", role: "Product Lead",
+                         organization: "Acme", notes: "Runs mobile & payments releases. Prefers crisp decision summaries before partner updates.")
+        _ = store.upsert(name: "Tom Chen", email: "tom@acme.io", role: "Staff Backend Engineer",
+                         organization: "Acme", notes: "Owns the refund API and payment webhook reliability.")
+        try? PeopleFile.save(store, to: peopleURL)
+
+        let voiceURL = root.deletingLastPathComponent().appendingPathComponent("voiceprints.json")
+        var memory = SpeakerMemory()
+        memory.remember(name: "Priya Patel", embedding: [1, 0, 0, 0], seconds: 420)
+        try? SpeakerMemoryFile.save(memory, to: voiceURL)
+
+        let soon = Date().addingTimeInterval(22 * 60)
+        let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: soon) ?? soon.addingTimeInterval(86_400)
+        let sampleEvents = [
+            CalendarMeeting(
+                id: "sample-class-lecture",
+                title: "PHYS 101 Introductory Seminar",
+                start: soon.addingTimeInterval(5 * 60),
+                end: soon.addingTimeInterval(65 * 60),
+                attendees: [
+                    CalendarAttendee(name: "Prof. Carter", status: .accepted),
+                    CalendarAttendee(name: "Priya Patel", status: .accepted),
+                ],
+                linkText: "Main Hall 210",
+                notes: "Bring printed handout",
+                calendarName: "Classes",
+                sourceKind: .icsFeed
+            ),
+            CalendarMeeting(
+                id: "sample-sync-next",
+                title: "Weekly product sync",
+                start: soon,
+                end: soon.addingTimeInterval(30 * 60),
+                attendees: [
+                    CalendarAttendee(name: "Priya Patel", email: "priya@acme.io", isOrganizer: true, status: .accepted),
+                    CalendarAttendee(name: "Tom Chen", email: "tom@acme.io", status: .accepted),
+                ],
+                linkText: "https://meet.google.com/abc-defg-hij",
+                notes: "Agenda: 1) Confirm 3.2 partner note went out, 2) Demo admin refund endpoint, 3) Review annual-plan FAQ.",
+                calendarName: "Work (Google)",
+                sourceKind: .appleCalendar
+            ),
+            CalendarMeeting(
+                id: "sample-design-tomorrow",
+                title: "Onboarding Q4 metrics review",
+                start: tomorrow,
+                end: tomorrow.addingTimeInterval(45 * 60),
+                attendees: [
+                    CalendarAttendee(name: "Priya Patel", email: "priya@acme.io", status: .accepted),
+                ],
+                linkText: "https://zoom.us/j/9123456789",
+                calendarName: "Product (.ics)",
+                sourceKind: .icsFeed
+            ),
+        ]
+        model.calendar.source = { sampleEvents }
+        model.calendar.reload()
     }
 
     static func write() {
@@ -46,8 +113,9 @@ enum SampleData {
                       SummaryPoint(text: "The onboarding test lifted day-7 retention from 31% to 36%, so it ships to everyone.", t: 1450),
                       SummaryPoint(text: "Support tickets are up 20% since the pricing change, mostly about annual plans.", t: 1905)],
             decisions: [SummaryPoint(text: "Onboarding variant B becomes the default.", t: 1490)],
-            actionItems: [ActionItem(owner: "Priya", task: "Send the new release date to partners", due: "Wed", t: 740),
+            actionItems: [ActionItem(owner: "Priya", task: "Send the new release date to you for partner review", due: "Wed", t: 740),
                           ActionItem(owner: "You", task: "Write an FAQ entry on annual plan refunds", due: "Fri"),
+                          ActionItem(owner: "David", task: "Clean up staging database fixtures", due: "Thu"),
                           ActionItem(owner: "Tom", task: "Check test coverage of the payments fix", done: true)],
             openQuestions: [],
             yourNotes: [NoteContext(t: 760, note: "Ask Tom about refund API",

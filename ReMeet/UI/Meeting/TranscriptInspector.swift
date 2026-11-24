@@ -18,10 +18,10 @@ struct TranscriptInspector: View {
     @State private var matchIndex = 0
     @State private var matchCount = 0
     @State private var finding = false
-    @State private var renaming: String?
-    @State private var renameText = ""
+    @State private var assignTarget: SpeakerAssignTarget?
     @FocusState private var findFocused: Bool
     @State private var selectedSpeaker: String?
+    @State private var selectedSegmentIndices = IndexSet()
     @State private var selectionHasMixedSpeakers = false
     @State private var voiceName = ""
     @State private var voiceNotice: String?
@@ -51,15 +51,19 @@ struct TranscriptInspector: View {
                         }
                     },
                     onPlayAt: { t in player.play(from: t) },
-                    onRenameSpeaker: { speakerID in
-                        renameText = document.speakers.names[speakerID] ?? ""
-                        renaming = speakerID
+                    onClickSpeaker: { speakerID, indices in
+                        let stored = document.speakers.names[speakerID] ?? ""
+                        let hasRealName = !SpeakerMemory.isPlaceholder(stored)
+                        let scope: SpeakerAssignTarget.Scope = (speakerID == SpeakerNames.youID || hasRealName) ? .thisTurn : .allTurns
+                        assignTarget = SpeakerAssignTarget(speakerID: speakerID, segmentIndices: IndexSet(indices), scope: scope)
                     },
-                    onWordSelectionChanged: { speakerID, mixed in
+                    onWordSelectionChanged: { speakerID, indices, mixed in
                         selectedSpeaker = speakerID
+                        selectedSegmentIndices = indices
                         selectionHasMixedSpeakers = mixed
                         if let speakerID {
-                            voiceName = document.speakers.names[speakerID] ?? ""
+                            let stored = document.speakers.names[speakerID] ?? ""
+                            voiceName = SpeakerMemory.isPlaceholder(stored) ? "" : stored
                         }
                         voiceNotice = nil
                     }
@@ -84,28 +88,31 @@ struct TranscriptInspector: View {
         }
         .onChange(of: document?.folder.id) { _, _ in
             selectedSpeaker = nil
+            selectedSegmentIndices = IndexSet()
             selectionHasMixedSpeakers = false
             voiceName = ""
             voiceNotice = nil
+            assignTarget = nil
             matchIndex = 0
         }
         .onChange(of: query) { _, _ in
             matchIndex = 0
         }
-        .alert("Rename speaker", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
-            TextField("Name", text: $renameText)
-            Button("Rename") {
-                if let renaming, let document {
-                    document.renameSpeaker(renaming, to: renameText)
-                    model.library.refresh(document.folder)
-                    model.documentEdited(document, reindexSearch: true)
-                    Task { _ = await model.scheduleSpeakerWording(document) }
-                }
-                renaming = nil
+        .sheet(item: $assignTarget) { target in
+            if let document {
+                SpeakerAssignSheet(
+                    document: document,
+                    target: target,
+                    onDone: { message in
+                        voiceNotice = message
+                        selectedSpeaker = nil
+                        selectedSegmentIndices = IndexSet()
+                        selectionHasMixedSpeakers = false
+                        clearSelectionToken += 1
+                    }
+                )
+                .environment(model)
             }
-            Button("Cancel", role: .cancel) { renaming = nil }
-        } message: {
-            Text("Only this voice is renamed. Other people in the meeting keep their names.")
         }
     }
 
@@ -121,7 +128,7 @@ struct TranscriptInspector: View {
             if finding {
                 TextField("Find", text: $query)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 150)
+                    .frame(minWidth: 80, maxWidth: 150)
                     .focused($findFocused)
                     .onSubmit { step(1) }
                     .onKeyPress(.escape) {
@@ -139,7 +146,17 @@ struct TranscriptInspector: View {
                 Button { step(1) } label: { Image(systemName: "chevron.down").frame(width: 22, height: 22).contentShape(Rectangle()) }
                     .buttonStyle(.plain).help("Next match (Return)")
             } else {
-                ShortcutHint("⌘F to find")
+                Button {
+                    openFind()
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundStyle(Theme.fg2)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Find in transcript (⌘F)")
             }
         }
         .padding(.horizontal, 16)
@@ -148,31 +165,75 @@ struct TranscriptInspector: View {
 
     private var voiceNaming: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if let speaker = selectedSpeaker {
-                HStack(spacing: 8) {
-                    TextField("Name this voice", text: $voiceName)
+            if let speaker = selectedSpeaker, let document {
+                HStack(spacing: 6) {
+                    TextField("Name or split turn", text: $voiceName)
                         .textFieldStyle(.roundedBorder)
                         .onSubmit { saveVoice(speaker) }
-                    Button("Save") { saveVoice(speaker) }
+                    Button("All turns") { saveVoice(speaker) }
                         .buttonStyle(.plain)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: 11.5, weight: .semibold))
                         .foregroundStyle(Theme.accent)
+                        .help("Rename \(document.speakers.displayName(for: speaker)) across the whole meeting and save voiceprint")
+                    if !selectedSegmentIndices.isEmpty {
+                        Button("This turn") { splitSelectedTurn(from: speaker) }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(Theme.fg)
+                            .help("Reassign or split out only the selected turn to this person")
+                    }
+                    Button("Pick…") {
+                        let stored = document.speakers.names[speaker] ?? ""
+                        let hasName = !SpeakerMemory.isPlaceholder(stored)
+                        assignTarget = SpeakerAssignTarget(
+                            speakerID: speaker,
+                            segmentIndices: selectedSegmentIndices,
+                            scope: (speaker == SpeakerNames.youID || hasName) ? .thisTurn : .allTurns
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.fg2)
+                    .help("Pick from meeting speakers, calendar invitees, or People")
+                    Button {
+                        selectedSpeaker = nil
+                        selectedSegmentIndices = IndexSet()
+                        selectionHasMixedSpeakers = false
+                        clearSelectionToken += 1
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Theme.fg3)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear selection")
+                }
+            } else if selectionHasMixedSpeakers, !selectedSegmentIndices.isEmpty, document != nil {
+                HStack(spacing: 8) {
+                    Text("\(selectedSegmentIndices.count) turns selected")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Theme.fg2)
+                    Spacer()
+                    Button("Assign to person…") {
+                        assignTarget = SpeakerAssignTarget(
+                            speakerID: "",
+                            segmentIndices: selectedSegmentIndices,
+                            scope: .thisTurn
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Theme.accent)
                     Button("Clear") {
                         selectedSpeaker = nil
+                        selectedSegmentIndices = IndexSet()
                         selectionHasMixedSpeakers = false
                         clearSelectionToken += 1
                     }
                     .buttonStyle(.plain)
-                    .font(.system(size: 12))
+                    .font(.caption)
                     .foregroundStyle(Theme.fg2)
                 }
-                Text("This name is kept with the voice and offered in later meetings. It does not merge anyone.")
-                    .font(.caption)
-                    .foregroundStyle(Theme.fg2)
-            } else if selectionHasMixedSpeakers {
-                Text("Select words from one person.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
             }
             if let voiceNotice {
                 Text(voiceNotice)
@@ -192,6 +253,28 @@ struct TranscriptInspector: View {
         model.documentEdited(document, reindexSearch: true)
         voiceNotice = "Saved \(document.speakers.displayName(for: speaker))."
         selectedSpeaker = nil
+        selectedSegmentIndices = IndexSet()
+        selectionHasMixedSpeakers = false
+        clearSelectionToken += 1
+        Task { _ = await model.scheduleSpeakerWording(document) }
+    }
+
+    private func splitSelectedTurn(from speaker: String) {
+        let name = voiceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, !selectedSegmentIndices.isEmpty, let document else { return }
+        if let existingID = document.callSpeakers.first(where: {
+            document.speakers.displayName(for: $0).caseInsensitiveCompare(name) == .orderedSame
+        }), existingID != speaker {
+            document.reassignSegments(at: selectedSegmentIndices, toSpeakerID: existingID)
+            voiceNotice = "Moved turn to \(document.speakers.displayName(for: existingID))."
+        } else {
+            document.splitSegmentsToNewSpeaker(at: selectedSegmentIndices, named: name)
+            voiceNotice = "Split turn to \(name)."
+        }
+        model.library.refresh(document.folder)
+        model.documentEdited(document, reindexSearch: true)
+        selectedSpeaker = nil
+        selectedSegmentIndices = IndexSet()
         selectionHasMixedSpeakers = false
         clearSelectionToken += 1
         Task { _ = await model.scheduleSpeakerWording(document) }
@@ -225,8 +308,8 @@ private struct TranscriptTextView: View {
     let onJumpConsumed: () -> Void
     let onMatchCountChanged: (Int) -> Void
     let onPlayAt: (Double) -> Void
-    let onRenameSpeaker: (String) -> Void
-    let onWordSelectionChanged: (String?, Bool) -> Void
+    let onClickSpeaker: (String, [Int]) -> Void
+    let onWordSelectionChanged: (String?, IndexSet, Bool) -> Void
 
     var body: some View {
         TranscriptRepresentable(
@@ -243,7 +326,7 @@ private struct TranscriptTextView: View {
             onJumpConsumed: onJumpConsumed,
             onMatchCountChanged: onMatchCountChanged,
             onPlayAt: onPlayAt,
-            onRenameSpeaker: onRenameSpeaker,
+            onClickSpeaker: onClickSpeaker,
             onWordSelectionChanged: onWordSelectionChanged
         )
     }
@@ -263,13 +346,17 @@ private struct TranscriptRepresentable: NSViewRepresentable {
     let onJumpConsumed: () -> Void
     let onMatchCountChanged: (Int) -> Void
     let onPlayAt: (Double) -> Void
-    let onRenameSpeaker: (String) -> Void
-    let onWordSelectionChanged: (String?, Bool) -> Void
+    let onClickSpeaker: (String, [Int]) -> Void
+    let onWordSelectionChanged: (String?, IndexSet, Bool) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: WidthTrackingScrollView, context: Context) -> CGSize? {
+        proposal.replacingUnspecifiedDimensions(by: CGSize(width: 320, height: 400))
+    }
+
+    func makeNSView(context: Context) -> WidthTrackingScrollView {
+        let scroll = WidthTrackingScrollView()
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
@@ -279,7 +366,7 @@ private struct TranscriptRepresentable: NSViewRepresentable {
         let textStorage = NSTextStorage()
         let layoutManager = NSLayoutManager()
         textStorage.addLayoutManager(layoutManager)
-        let textContainer = NSTextContainer(containerSize: NSSize(width: 340, height: CGFloat.greatestFiniteMagnitude))
+        let textContainer = NSTextContainer(containerSize: NSSize(width: 300, height: CGFloat.greatestFiniteMagnitude))
         textContainer.widthTracksTextView = true
         layoutManager.addTextContainer(textContainer)
 
@@ -287,7 +374,9 @@ private struct TranscriptRepresentable: NSViewRepresentable {
         textView.isEditable = false
         textView.isSelectable = true
         textView.drawsBackground = false
-        textView.textContainerInset = NSSize(width: 14, height: 14)
+        textView.minSize = .zero
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainerInset = NSSize(width: 14, height: 12)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
@@ -300,10 +389,10 @@ private struct TranscriptRepresentable: NSViewRepresentable {
         return scroll
     }
 
-    func updateNSView(_ scroll: NSScrollView, context: Context) {
+    func updateNSView(_ scroll: WidthTrackingScrollView, context: Context) {
         let c = context.coordinator
         c.onPlayAt = onPlayAt
-        c.onRenameSpeaker = onRenameSpeaker
+        c.onClickSpeaker = onClickSpeaker
         c.onWordSelectionChanged = onWordSelectionChanged
         c.onMatchCountChanged = onMatchCountChanged
 
@@ -328,6 +417,7 @@ private struct TranscriptRepresentable: NSViewRepresentable {
             c.clearPickedRange()
         }
 
+        scroll.syncDocumentWidth()
         c.updatePlaybackHighlight(isPlaying: isPlaying, currentTime: currentTime)
 
         if let jumpTime {
@@ -345,6 +435,7 @@ private struct TranscriptRepresentable: NSViewRepresentable {
             var start: Double
             var end: Double
             var speaker: String
+            var segmentIndex: Int
         }
 
         struct BlockAnchor {
@@ -354,7 +445,7 @@ private struct TranscriptRepresentable: NSViewRepresentable {
 
         struct ClickTarget {
             enum Kind {
-                case speaker(String)
+                case speaker(String, [Int])
                 case time(Double)
             }
             var range: NSRange
@@ -368,8 +459,8 @@ private struct TranscriptRepresentable: NSViewRepresentable {
         var speakers = SpeakerNames()
 
         var onPlayAt: ((Double) -> Void)?
-        var onRenameSpeaker: ((String) -> Void)?
-        var onWordSelectionChanged: ((String?, Bool) -> Void)?
+        var onClickSpeaker: ((String, [Int]) -> Void)?
+        var onWordSelectionChanged: ((String?, IndexSet, Bool) -> Void)?
         var onMatchCountChanged: ((Int) -> Void)?
 
         private var wordSpans: [WordSpan] = []
@@ -419,16 +510,19 @@ private struct TranscriptRepresentable: NSViewRepresentable {
 
             // Group consecutive segments of the same speaker, interleaved with notes.
             var blocks: [(start: Double, kind: BlockKind)] = []
+            var segIndex = 0
             for item in Stitcher.interleave(transcript.segments, notes: notes) {
                 switch item {
                 case .note(let note):
                     blocks.append((note.t, .note(note)))
                 case .segment(let s):
+                    let indexed = (index: segIndex, segment: s)
+                    segIndex += 1
                     if let last = blocks.last, case .speech(let sp, var segs) = last.kind, sp == s.speaker {
-                        segs.append(s)
+                        segs.append(indexed)
                         blocks[blocks.count - 1].kind = .speech(speaker: sp, segments: segs)
                     } else {
-                        blocks.append((s.start, .speech(speaker: s.speaker, segments: [s])))
+                        blocks.append((s.start, .speech(speaker: s.speaker, segments: [indexed])))
                     }
                 }
             }
@@ -467,7 +561,7 @@ private struct TranscriptRepresentable: NSViewRepresentable {
                         start: block.start,
                         range: NSRange(location: blockStartLoc, length: built.length - blockStartLoc)))
 
-                case .speech(let speaker, let segments):
+                case .speech(let speaker, let indexedSegments):
                     let pStyle = blockIndex == 0 ? firstHeaderParagraph : headerParagraph
                     let nameLoc = built.length
                     let displayName = speakers.displayName(for: speaker)
@@ -479,7 +573,7 @@ private struct TranscriptRepresentable: NSViewRepresentable {
                     ]))
                     clickTargets.append(ClickTarget(
                         range: NSRange(location: nameLoc, length: (displayName as NSString).length),
-                        kind: .speaker(speaker)))
+                        kind: .speaker(speaker, indexedSegments.map(\.index))))
 
                     built.append(NSAttributedString(string: "  ", attributes: [
                         .font: timeFont,
@@ -498,7 +592,7 @@ private struct TranscriptRepresentable: NSViewRepresentable {
                         kind: .time(block.start)))
 
                     var firstWord = true
-                    for segment in segments {
+                    for (segmentIndex, segment) in indexedSegments {
                         let timed = WordLayout.words(text: segment.text, start: segment.start,
                                                      end: segment.end, timed: segment.words)
                         for word in timed {
@@ -521,7 +615,8 @@ private struct TranscriptRepresentable: NSViewRepresentable {
                                 range: NSRange(location: loc, length: len),
                                 start: word.start,
                                 end: word.end,
-                                speaker: speaker))
+                                speaker: speaker,
+                                segmentIndex: segmentIndex))
                         }
                     }
                     built.append(NSAttributedString(string: "\n", attributes: [
@@ -540,7 +635,7 @@ private struct TranscriptRepresentable: NSViewRepresentable {
         }
 
         private enum BlockKind {
-            case speech(speaker: String, segments: [TranscriptSegment])
+            case speech(speaker: String, segments: [(index: Int, segment: TranscriptSegment)])
             case note(MeetingNote)
         }
 
@@ -645,8 +740,8 @@ private struct TranscriptRepresentable: NSViewRepresentable {
             // 1. Speaker name or timestamp click
             if let target = clickTargets.first(where: { NSLocationInRange(charIndex, $0.range) }) {
                 switch target.kind {
-                case .speaker(let id):
-                    onRenameSpeaker?(id)
+                case .speaker(let id, let indices):
+                    onClickSpeaker?(id, indices)
                 case .time(let t):
                     onPlayAt?(t)
                 }
@@ -663,12 +758,13 @@ private struct TranscriptRepresentable: NSViewRepresentable {
                     let hi = max(anchor, idx)
                     let start = wordSpans[lo].range.location
                     let end = wordSpans[hi].range.location + wordSpans[hi].range.length
+                    let indices = IndexSet(wordSpans[lo...hi].map(\.segmentIndex))
                     setPickedRange(NSRange(location: start, length: end - start))
-                    onWordSelectionChanged?(span.speaker, false)
+                    onWordSelectionChanged?(span.speaker, indices, false)
                 } else {
                     pickedWordAnchorIndex = idx
                     setPickedRange(span.range)
-                    onWordSelectionChanged?(span.speaker, false)
+                    onWordSelectionChanged?(span.speaker, IndexSet([span.segmentIndex]), false)
                 }
                 return true
             }
@@ -679,15 +775,16 @@ private struct TranscriptRepresentable: NSViewRepresentable {
             guard let textView else { return }
             let selected = textView.selectedRange()
             guard selected.length > 0 else { return }
-            // Drag-selecting text lets users both copy AND name a speaker if all words belong to one speaker.
+            // Drag-selecting text lets users both copy AND name/split a speaker turn.
             let overlapping = wordSpans.filter { NSIntersectionRange($0.range, selected).length > 0 }
             guard !overlapping.isEmpty else { return }
             clearPickedRange()
+            let indices = IndexSet(overlapping.map(\.segmentIndex))
             let speakersInSelection = Set(overlapping.map(\.speaker))
             if speakersInSelection.count == 1, let only = speakersInSelection.first {
-                onWordSelectionChanged?(only, false)
+                onWordSelectionChanged?(only, indices, false)
             } else {
-                onWordSelectionChanged?(nil, true)
+                onWordSelectionChanged?(nil, indices, true)
             }
         }
 
@@ -732,6 +829,252 @@ private struct TranscriptRepresentable: NSViewRepresentable {
     }
 }
 
+// MARK: - Turn & Speaker Assignment Sheet
+
+private struct SpeakerAssignTarget: Identifiable, Equatable {
+    enum Scope: String, CaseIterable, Identifiable {
+        case thisTurn = "This turn"
+        case allTurns = "All turns"
+        var id: String { rawValue }
+    }
+
+    let id = UUID()
+    let speakerID: String
+    let segmentIndices: IndexSet
+    var scope: Scope
+}
+
+private struct SpeakerAssignSheet: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
+    let document: MeetingDocument
+    let target: SpeakerAssignTarget
+    let onDone: (String) -> Void
+
+    @State private var scope: SpeakerAssignTarget.Scope
+    @State private var nameInput = ""
+
+    init(document: MeetingDocument, target: SpeakerAssignTarget, onDone: @escaping (String) -> Void) {
+        self.document = document
+        self.target = target
+        self.onDone = onDone
+        _scope = State(initialValue: target.speakerID.isEmpty ? .thisTurn : target.scope)
+        if target.scope == .allTurns, !target.speakerID.isEmpty {
+            let stored = document.speakers.names[target.speakerID] ?? ""
+            _nameInput = State(initialValue: SpeakerMemory.isPlaceholder(stored) ? "" : stored)
+        }
+    }
+
+    private var currentLabel: String {
+        target.speakerID.isEmpty ? "Selected turns" : document.speakers.displayName(for: target.speakerID)
+    }
+
+    private var canEditAllTurns: Bool {
+        !target.speakerID.isEmpty && target.speakerID != SpeakerNames.youID
+    }
+
+    private var invitees: [String] {
+        let q = nameInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        return document.meta.calendarAttendees
+            .filter { $0.status != .declined }
+            .map(\.name)
+            .filter { !SpeakerMemory.isPlaceholder($0) && $0.caseInsensitiveCompare(AppModel.recorderName) != .orderedSame }
+            .filter { q.isEmpty || $0.localizedCaseInsensitiveContains(q) }
+    }
+
+    private var filteredPeople: [PersonSummary] {
+        let q = nameInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let inviteSet = Set(invitees.map { $0.lowercased() })
+        return model.hub.people.filter { p in
+            !inviteSet.contains(p.profile.name.lowercased())
+                && (q.isEmpty || p.profile.name.localizedCaseInsensitiveContains(q))
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text(scope == .thisTurn ? "Assign \(currentLabel)" : "Rename \(currentLabel)")
+                    .font(.headline)
+                Spacer()
+                if canEditAllTurns && !target.segmentIndices.isEmpty {
+                    Picker("Scope", selection: $scope) {
+                        ForEach(SpeakerAssignTarget.Scope.allCases) { s in
+                            Text(s.rawValue).tag(s)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(width: 175)
+                }
+            }
+
+            HStack(spacing: 8) {
+                TextField(scope == .thisTurn ? "Type or search a person to assign…" : "Type name for all turns…", text: $nameInput)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { applyTypedName() }
+                AccentCapsuleButton(
+                    title: scope == .thisTurn ? "Assign" : "Save",
+                    small: true
+                ) {
+                    applyTypedName()
+                }
+                .disabled(nameInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    // Other speakers already in this recording (You + call speakers)
+                    let otherIDs = ([SpeakerNames.youID] + document.callSpeakers).filter { $0 != target.speakerID }
+                    if !otherIDs.isEmpty {
+                        Text("In this recording")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.fg3)
+                        WrappingFlowLayout(spacing: 6, lineSpacing: 6) {
+                            ForEach(otherIDs, id: \.self) { id in
+                                let label = id == SpeakerNames.youID
+                                    ? "You (\(AppModel.recorderName))"
+                                    : document.speakers.displayName(for: id)
+                                Button {
+                                    assignToExistingSpeaker(id: id)
+                                } label: {
+                                    HStack(spacing: 5) {
+                                        if id != SpeakerNames.youID {
+                                            PersonAvatarView(name: label, size: 16)
+                                        }
+                                        Text(label)
+                                            .font(.system(size: 12, weight: .medium))
+                                    }
+                                    .foregroundStyle(Theme.fg)
+                                    .padding(.horizontal, 9)
+                                    .padding(.vertical, 4)
+                                    .background(Theme.mark.opacity(0.65), in: Capsule())
+                                    .overlay(Capsule().stroke(Theme.accent.opacity(0.25)))
+                                }
+                                .buttonStyle(.plain)
+                                .help(scope == .thisTurn
+                                      ? "Move this turn to \(label)"
+                                      : "Merge all \(currentLabel) turns into \(label)")
+                            }
+                        }
+                    }
+
+                    if !invitees.isEmpty {
+                        Text("Calendar invite")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.fg3)
+                            .padding(.top, 2)
+                        WrappingFlowLayout(spacing: 6, lineSpacing: 6) {
+                            ForEach(invitees, id: \.self) { personName in
+                                personPickChip(name: personName, badge: "calendar")
+                            }
+                        }
+                    }
+
+                    if !filteredPeople.isEmpty {
+                        Text("People")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.fg3)
+                            .padding(.top, 2)
+                        WrappingFlowLayout(spacing: 6, lineSpacing: 6) {
+                            ForEach(filteredPeople.prefix(16)) { person in
+                                personPickChip(name: person.profile.name,
+                                               badge: person.hasVoiceprint ? "waveform" : nil)
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: 200)
+
+            HStack {
+                if scope == .allTurns,
+                   !target.speakerID.isEmpty,
+                   !SpeakerMemory.isPlaceholder(document.speakers.names[target.speakerID] ?? "") {
+                    Button("Clear name & unlearn voice", role: .destructive) {
+                        document.clearSpeakerName(target.speakerID)
+                        finish(with: "Cleared \(currentLabel).")
+                    }
+                    .controlSize(.small)
+                }
+                Spacer()
+                Button("Cancel", role: .cancel) { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+        .padding(18)
+        .frame(width: 410)
+    }
+
+    private func personPickChip(name: String, badge: String?) -> some View {
+        Button {
+            nameInput = name
+            applyTypedName()
+        } label: {
+            HStack(spacing: 5) {
+                PersonAvatarView(name: name, size: 16)
+                Text(name)
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                if let badge {
+                    Image(systemName: badge)
+                        .font(.system(size: 9.5))
+                        .foregroundStyle(Theme.accent)
+                }
+            }
+            .foregroundStyle(Theme.fg)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Theme.bg, in: Capsule())
+            .overlay(Capsule().stroke(Theme.line))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func assignToExistingSpeaker(id existingID: String) {
+        let label = existingID == SpeakerNames.youID ? "You" : document.speakers.displayName(for: existingID)
+        if scope == .thisTurn, !target.segmentIndices.isEmpty {
+            document.reassignSegments(at: target.segmentIndices, toSpeakerID: existingID)
+            finish(with: "Moved turn to \(label).")
+        } else if !target.speakerID.isEmpty {
+            document.mergeSpeakers(from: target.speakerID, into: existingID)
+            finish(with: "Merged into \(label).")
+        }
+    }
+
+    private func applyTypedName() {
+        let trimmed = nameInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if scope == .allTurns, canEditAllTurns {
+            document.renameSpeaker(target.speakerID, to: trimmed)
+            finish(with: "Renamed to \(trimmed).")
+        } else if !target.segmentIndices.isEmpty {
+            if trimmed.caseInsensitiveCompare("You") == .orderedSame
+                || (!AppModel.recorderName.isEmpty && trimmed.caseInsensitiveCompare(AppModel.recorderName) == .orderedSame) {
+                document.reassignSegments(at: target.segmentIndices, toSpeakerID: SpeakerNames.youID)
+                finish(with: "Moved turn to You.")
+            } else if let existingID = document.callSpeakers.first(where: {
+                document.speakers.displayName(for: $0).caseInsensitiveCompare(trimmed) == .orderedSame
+            }) {
+                document.reassignSegments(at: target.segmentIndices, toSpeakerID: existingID)
+                finish(with: "Moved turn to \(document.speakers.displayName(for: existingID)).")
+            } else {
+                document.splitSegmentsToNewSpeaker(at: target.segmentIndices, named: trimmed)
+                finish(with: "Split turn as \(trimmed).")
+            }
+        }
+    }
+
+    private func finish(with message: String) {
+        model.library.refresh(document.folder)
+        model.documentEdited(document, reindexSearch: true)
+        onDone(message)
+        dismiss()
+        Task { _ = await model.scheduleSpeakerWording(document) }
+    }
+}
+
 /// Custom `NSTextView` that distinguishes a quick click (play word / rename speaker / shift-pick)
 /// from a drag selection (native text selection + copy + multi-word voice naming).
 private final class InteractiveTranscriptTextView: NSTextView {
@@ -763,5 +1106,43 @@ private final class InteractiveTranscriptTextView: NSTextView {
 
     override func resetCursorRects() {
         super.resetCursorRects()
+    }
+}
+
+/// Ensures `NSTextContainer` and `NSTextView` width track the actual viewport width whenever
+/// the inspector pane resizes, eliminating horizontal clipping at narrow inspector widths.
+private final class WidthTrackingScrollView: NSScrollView {
+    private var lastSyncedWidth: CGFloat = 0
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
+
+    override func layout() {
+        super.layout()
+        syncDocumentWidth()
+    }
+
+    func syncDocumentWidth() {
+        guard let textView = documentView as? NSTextView else { return }
+        let width = contentSize.width
+        guard width > 20, abs(width - lastSyncedWidth) > 0.5 else { return }
+        lastSyncedWidth = width
+        if abs(textView.frame.width - width) > 0.5 {
+            var frame = textView.frame
+            frame.size.width = width
+            textView.frame = frame
+        }
+        if let container = textView.textContainer {
+            let targetWidth = max(40, width - 2 * textView.textContainerInset.width)
+            if abs(container.containerSize.width - targetWidth) > 0.5 {
+                container.containerSize = NSSize(width: targetWidth, height: .greatestFiniteMagnitude)
+                DispatchQueue.main.async { [weak textView] in
+                    guard let textView, let container = textView.textContainer else { return }
+                    textView.layoutManager?.ensureLayout(for: container)
+                    textView.needsDisplay = true
+                }
+            }
+        }
     }
 }

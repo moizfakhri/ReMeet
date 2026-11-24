@@ -45,10 +45,23 @@ struct WindowChrome: NSViewRepresentable {
         @objc private func windowChanged() { apply(to: window) }
 
         func apply(to window: NSWindow?) {
-            guard let window else { return }
+            guard let window, window.styleMask.contains(.titled) else { return }
             if !window.styleMask.contains(.resizable) { window.styleMask.insert(.resizable) }
             let min = NSSize(width: minSize.width, height: minSize.height)
-            if window.contentMinSize != min { window.contentMinSize = min }
+            if window.contentMinSize != min {
+                window.contentMinSize = min
+                let frameMin = window.frameRect(forContentRect: NSRect(origin: .zero, size: min)).size
+                var frame = window.frame
+                var resized = false
+                if frame.width < frameMin.width { frame.size.width = frameMin.width; resized = true }
+                if frame.height < frameMin.height { frame.size.height = frameMin.height; resized = true }
+                if resized, window.isVisible {
+                    DispatchQueue.main.async { [weak window] in
+                        guard let window, window.isVisible else { return }
+                        window.setFrame(frame, display: true, animate: true)
+                    }
+                }
+            }
             let cap = NSSize(width: 16_000, height: 12_000)
             if window.contentMaxSize.width < 8_000 || window.contentMaxSize.height < 8_000 {
                 window.contentMaxSize = cap

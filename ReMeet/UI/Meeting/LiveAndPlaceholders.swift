@@ -9,7 +9,7 @@ struct LiveRecordingView: View {
 
     var body: some View {
         let recorder = model.recorder
-        ScrollView {
+        ResponsiveDocumentScroll(maxWidth: 640, topPadding: 32, bottomPadding: 48) { _ in
             VStack(alignment: .leading, spacing: 20) {
                 HStack(spacing: 10) {
                     Circle().fill(Theme.recording).frame(width: 10, height: 10)
@@ -18,7 +18,26 @@ struct LiveRecordingView: View {
                 Text(TimeFormat.timer(recorder.elapsed))
                     .font(.system(size: 44, weight: .medium, design: .monospaced))
                     .monospacedDigit()
-                HStack(spacing: 24) {
+
+                HStack(spacing: 6) {
+                    Image(systemName: recorder.isBluetoothInput ? "airpodspro" : "mic.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(recorder.isBluetoothInput ? Theme.accent : Theme.fg2)
+                    Text(liveDeviceSummary)
+                        .font(.callout)
+                        .foregroundStyle(Theme.fg2)
+                }
+
+                if let issue = recorder.activeAudioIssue {
+                    LiveAudioIssueBanner(
+                        issue: issue,
+                        compact: false,
+                        onAction: { recorder.performAudioIssueAction($0) },
+                        onDismiss: { recorder.dismissAudioIssue(issue.kind) }
+                    )
+                }
+
+                WrappingFlowLayout(spacing: 24, lineSpacing: 12) {
                     VStack(alignment: .leading) {
                         Text("You").font(.caption).foregroundStyle(Theme.fg2)
                         LevelBars(level: recorder.micLevel, count: 24).frame(height: 12)
@@ -38,7 +57,7 @@ struct LiveRecordingView: View {
                         }
                     }
                 }
-                HStack {
+                WrappingFlowLayout(spacing: 10, lineSpacing: 8) {
                     Button("Add note  \(KeyboardShortcuts.Name.addNote.hint)") { model.addNoteShortcut() }
                         .buttonStyle(.glass)
                     Button("Stop  \(KeyboardShortcuts.Name.toggleRecording.hint)") { recorder.stop() }
@@ -49,11 +68,19 @@ struct LiveRecordingView: View {
                     .font(.callout)
                     .foregroundStyle(Theme.fg2)
             }
-            .frame(maxWidth: 620, alignment: .leading)
-            .padding(40)
-            .frame(maxWidth: .infinity)
         }
-        .background(Theme.surface)
+    }
+
+    private var liveDeviceSummary: String {
+        let recorder = model.recorder
+        let mic = recorder.inputDevice?.name ?? "No microphone"
+        if let sw = recorder.lastInputSwitch {
+            return "\(sw.name) · switched at \(TimeFormat.clock(sw.at))"
+        }
+        if let out = recorder.outputDevice?.name, out != mic {
+            return "\(mic) · Call out: \(out)"
+        }
+        return mic
     }
 }
 
