@@ -107,3 +107,18 @@ dataset (now including both `index.sqlite` FTS5 and `chunks.sqlite` RAG hybrid i
 | Meeting switch decode → display | **17–20 ms** off-main | Restored async `MeetingDocument.load` + precomputed derived fields (`wordCount`, audio paths, speaker clips/likeness) off-main so SwiftUI `body` does zero `FileManager` or cosine work |
 | Transcript rendering (long calls) | **AppKit `NSTextView`** | Replaced thousands of per-word SwiftUI `Button` views in uncached `FlowLayout` with `NSAttributedString` + `NSLayoutManager` temporary attributes ($O(\log W)$ word lookup, zero relayout at 10 Hz playback) |
 | Chunk index sync | **$O(N)$ SQLite reads** | Fixed $O(N^2)$ full-table scan per meeting inside `ChunkIndex.sync`; stopped reindexing on stage-start ticks |
+
+---
+
+## Follow-up pass (2026-11-24 — Workspace Hubs, Audio Guardrails & Responsive UI)
+
+Measured on the same M4 MacBook Pro (16 GB, macOS 27), Release build, 150-meeting synthetic
+dataset (with FTS5 `index.sqlite`, hybrid RAG `chunks.sqlite`, People directory, Key Moments,
+Commitments Radar, `HubCoordinator`, and calendar sync initialized):
+
+| What | Measured | Notes |
+|---|---|---|
+| Launch: menu bar ready (5 runs) | **207–327 ms** (median **284.9 ms**) | `207.2, 283.4, 284.9, 286.8, 326.9 ms` via `Perf.mark` |
+| Launch: 150-meeting library scan | **17–50 ms** (median **19.6 ms**) | `library.loaded - launch.end` off the main thread |
+| Open meeting window (first / reopen) | **192.6 ms** appear · **565.0 ms** document / **97.9 ms** reopen | Medians across 5 runs (`document.shown` 19–26 ms off-main after first runloop) |
+| Idle CPU / memory (60 s, 12 samples) | **0.03% CPU · 0.03 power · 35 MB** `phys_footprint` | `35M+` in `top`; event-driven audio & calendar monitors with background hub aggregation |

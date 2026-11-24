@@ -6,6 +6,54 @@ All performance numbers were measured on a **base Apple M4 MacBook Pro (16 GB un
 
 ---
 
+## [2026-11-24] — People & Calendar Hubs, Key Moments, Audio Guardrails, Responsive Split Layout & UX Polish
+
+### Added
+- **People Hub & Cross-Meeting Memory (`PeopleStore`, `PeopleViews`):**
+  - Local people directory in `~/ReMeet/people.json` built automatically from speaker names, manual profiles, and calendar invitees, tracking meeting counts, spoken time, voiceprint seconds, free-form context notes, and per-person open commitments.
+  - Supports editing profiles, merging duplicate people, resetting individual voiceprints, and filtering by *All*, *Voice*, *Soon*, or *Tasks*.
+- **Apple Calendar + RFC-5545 `.ics` Calendar Sync & Schedule Filtering (`ICalendarParser`, `CalendarWatcher`, `MeetingReminder`):**
+  - Combines EventKit events with subscribed Google, Outlook, and iCloud `.ics` feeds (with `RRULE`/`EXDATE` expansion, folded-line parsing, and cross-source deduplication).
+  - Added `MeetingReminder.hasOnlineMeetingPlatform(_:)` and `nextOnlineMeeting(_:now:reminded:)` (covering 14 platforms: Teams, Zoom, Google Meet, Webex, FaceTime, Slack Huddle, Discord, Amazon Chime, GoTo, Whereby, Jitsi, RingCentral, BlueJeans, and Gather, plus explicit location labels like `"Microsoft Teams Meeting"` and call URLs in `notes`) so classes and physical-only calendar entries stay out of Schedule and reminder prompts.
+- **Walk-In Pre-Meeting Prep Briefs & Follow-Up Composer (`MeetingPrepBrief`, `FollowUpComposer`, `ScheduleViews`):**
+  - Assembles recurring series history, carryover decisions/open questions, attendee context cards, mutual open promises (*What YOU promised* / *What THEY promised you*), and one-click **Join & Record** + **Copy Brief** before meetings.
+  - Added one-click **Follow-up** draft composer directly in the meeting header.
+- **Prioritized Commitments Radar & Action-Item Relevance (`CommitmentsRadar`, `Documents`, `SummaryParser`):**
+  - Extended `ActionItem` with `relatesToMe` (`relates_to_me`) and `dismissed` (backward-compatible JSON decoding), joint-owner detection (`"Alex and Priya"`), and 1:1 elevation.
+  - Prioritizes **For you** and **Waiting on others** on top while collapsing unrelated **Other team items**, with `7d` / `30d` / `All` recency filters, hover `...` relevance overrides, and one-click dismissal across both meeting summaries and Commitments Radar.
+- **Key Moments, Moments Gallery, Highlight Reel & Conversation Pulse (`KeyMoments`, `KeyMomentsSection`, `MomentsGalleryView`, `HubCoordinator`):**
+  - Surfaces visual tile cards (*Pinned*, *Decisions*, *Commitments*, *Key Points*) inside meetings and in a searchable cross-meeting **Moments** gallery, with sequential **Highlight Reel** playback and a clickable **Conversation Pulse** speaker talk-share ribbon.
+- **Audio Route Resilience, Sound Check & Live Recording Health (`AudioHealthEvaluator`, `SoundCheckView`, `LevelProbe`, `RecorderService`, `MicCapture`):**
+  - Handles AirPods, Bluetooth headset, and USB/built-in mic switches cleanly mid-session via Core Audio default-device listeners, stalled-stream recovery, and live `AVAudioEngine` / sample-rate reconfiguration.
+  - Added pre-call **Sound Check** sheet/card (`You` mic dB meter + 3 s voice check, `Call` meter + call audio loopback check, sample rate readout) accessible from the menu bar, onboarding, and upcoming meeting cards.
+  - Added `AudioHealthEvaluator` to surface actionable warnings for OS/hardware-muted mics, digital-zero flatlined inputs, stalled Bluetooth streams, blocked call audio capture, and call-app mic mismatches.
+- **Turn-Level Speaker Assignment & Clean Voiceprint Unlearning (`SpeakerMemory`, `SpeakerAssignSheet`, `MeetingDocument`):**
+  - Added `KnownVoice.Contribution` (`sourceKey: "<meetingID>::<speakerID>"`) and `SpeakerMemory.unlearn(sourceKey:)` so correcting a mislabelled speaker removes the contaminated vector and recomputes the weighted centroid from remaining clean recordings; added `rankedMatches` and `expectedCallSpeakers` up to `1...12`.
+  - Added `SpeakerAssignSheet` (`This turn` vs `All turns`, quick-pick speakers already in the recording, calendar invitees, People directory chips, and clear/unlearn action) plus quick-pick People menus and dismissible suggestions in `MeetingDetailView`.
+
+### UI / UX Polish & Bug Fixes
+- **Responsive Window Resizing & Narrow 3-Column Split Fix (`MeetingWindowRoot`, `WindowChrome`, `TranscriptInspector`, `HubComponents`):**
+  - Replaced SwiftUI `.inspector(isPresented:)` (which triggered a macOS 27 `SplitViewChildController.hostingController(_:didUpdateMinSize:maxSize:)` constraint loop at narrow widths) with a `GeometryReader`-driven, user-draggable split pane (`240–480 pt`) and dynamic `minWindowWidth` (`760` closed, `840` 3-column, `680` collapsed sidebar; auto-collapses sidebar below `920 pt` when opening Transcript).
+  - Added `WidthTrackingScrollView` (`intrinsicContentSize = noIntrinsicMetric` + async layout flush) so `NSTextContainer` tracks viewport width without right-edge transcript clipping.
+  - Added `ResponsiveDocumentScroll` and `WrappingFlowLayout` across detail views, stacked `MeetingChatPanel` inputs cleanly on narrow panes (`compact: width < 400`), wrapped `ConversationPulseBar` talk-share pills, made `PlayerCapsule` scrubbers flexible, and aligned `PeopleViews` stat card heights.
+- **Visual Clutter Reduction (`MeetingSidebar`, `TranscriptInspector`, `MomentsGalleryView`, `ScheduleViews`):**
+  - Switched workspace tabs to icon-only buttons with `.help(...)` hover tooltips, replaced the persistent `"Add context or AI export folder..."` card under configured folders with a dismissible one-time setup hint for empty folders plus hover folder-settings actions, replaced `"⌘F to find"` text with a search button tooltip, and removed redundant captions.
+
+### Performance & Efficiency Measurements
+Measured on a base M4 MacBook Pro (16 GB, macOS 27) running the Release build against a fresh 150-meeting synthetic dataset (with FTS5 `index.sqlite`, hybrid RAG `chunks.sqlite`, People directory, Commitments radar, Key Moments, `HubCoordinator`, and calendar sync initialized):
+- **Launch (`menubar.ready`, 5 runs):** **207–327 ms** (median **284.9 ms**: `207.2`, `283.4`, `284.9`, `286.8`, `326.9 ms`).
+- **150-meeting library scan off main (`library.loaded - launch.end`):** **17.3–49.6 ms** (median **19.6 ms**, off the main thread).
+- **Window open (`window.open.request` → `window.appear` / `document.shown`):** **170–208 ms** to window appear (median **192.6 ms**); **545–583 ms** first open to document shown (median **565.0 ms**); **92–105 ms** on window reopen (median **97.9 ms**).
+- **Idle CPU / power / memory (60 s across 12 samples):** **0.03% CPU**, **0.03 power**, **35 MB** `phys_footprint` (`35M+` in `top`).
+
+### Verification
+- `ReMeetKit` unit tests (`swift test --package-path Packages/ReMeetKit`): **156 / 156 passed** across 38 suites (including `AudioHealthTests`, `HubFeaturesTests`, and `PolishFeaturesTests`).
+- `scripts/selftests.sh`: **76 / 76 passed** (`bubble` 26/26, `compress` 19/19, `player` 8/8, `search` 11/11, `backends` 6/6, `processmonitor` 3/3, `tapfilter` 3/3).
+- Additional Release `--selftest` checks: `window` (**8/8**), `folders` (**8/8**), `bughunt reloadthen` (**3/3**), `bughunt queuedrain` (**5/5**), `bughunt callwarning` (**1/1**).
+- Full Light & Dark offscreen snapshot verification across all rendered views (including `meeting-narrow-inspector`, `commitments-radar`, `schedule-prep`, `people-detail`, `moments-gallery`, and `sound-check`).
+
+---
+
 ## [2026-11-21] — AI Agent Markdown Export, Startup & Idle Efficiency, NSTextView Transcript, Screen-Share Hiding, and UI Redesign
 
 ### Added

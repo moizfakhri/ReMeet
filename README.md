@@ -2,12 +2,12 @@
 
 <h1 align="center">ReMeet</h1>
 
-<p align="center">A meeting recorder for macOS that transcribes on your Mac.<br>It records your microphone and the call as two tracks, labels who spoke, and writes a transcript and summary.</p>
+<p align="center">A local-first meeting recorder and memory hub for macOS.<br>It records your microphone and the call as two tracks, tracks people and commitments, surfaces Key Moments, and transcribes &amp; summarizes on your Mac.</p>
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/meeting-dark.png">
-    <img src="docs/images/meeting-light.png" width="820" alt="The ReMeet meeting window: a sidebar of meetings and a summary with decisions and action items">
+    <img src="docs/images/meeting-light.png" width="820" alt="The ReMeet workspace: icon-only workspace tabs (Meetings, Schedule, People, Moments), folder sidebar, Conversation Pulse talk-share ribbon, Key Moments cards, and meeting summary">
   </picture>
 </p>
 
@@ -15,31 +15,47 @@
 
 Phone recorders stop working the moment you put headphones in, because the other side of the
 call never reaches the phone's microphone. ReMeet captures the call audio on the Mac itself, next
-to your mic, so it works with AirPods and with any meeting app. Speech recognition and speaker
-labels run locally with open models. There is no account, no server and no subscription.
+to your mic, so it works with AirPods and with any meeting app. Speech recognition, speaker
+embeddings, Key Moments, people profiles, and search run locally with open models. There is no
+account, no server and no subscription.
 
 ## What it does
 
-**Recording**
+**Recording & audio safety**
 
 - Starts from the menu bar or with <kbd>⌥</kbd><kbd>⌘</kbd><kbd>R</kbd>. Your mic and the call
   audio are saved as separate tracks, so your voice is always labelled as you.
-- Follows the input device your meeting app is using, and can capture audio from meeting apps
-  only, leaving music and notifications out.
-- Offers to record a minute before a calendar meeting, and when Zoom, Teams, FaceTime, Slack,
-  Webex, Discord or a browser call turns the microphone on. The recording takes the event's name.
-- Stops by itself when the call ends, after a 10 second countdown you can cancel.
-- Imports existing audio files through the same pipeline.
+- Follows the active input device (switching seamlessly between AirPods, Bluetooth headsets, USB
+  mics, and your Mac's built-in mic) and can capture audio from meeting apps only, leaving music and
+  notifications out.
+- **Pre-call Sound Check:** live mic and call-audio level meters with a sample-rate readout, 3-second
+  mic test, and call-audio loopback check directly from the menu bar or upcoming meeting cards.
+- **Live silent-recording guardrails:** continuously checks recording health and surfaces clear menu
+  bar and pill warnings for an OS-muted mic, flatlined dead input, stalled Bluetooth streams,
+  blocked call capture, or call-app mic mismatches.
+- Reminds you a minute before online calendar meetings (filtering out classes and physical-only
+  blocks) across **14 call platforms**: Zoom, Teams, Google Meet, Webex, FaceTime, Slack Huddle,
+  Discord, Amazon Chime, GoTo Meeting, Whereby, Jitsi, RingCentral, BlueJeans, and Gather, and
+  starts/stops automatically when a call uses the microphone.
+- Imports existing audio files preserving original file creation dates, with editable meeting
+  date &amp; time in the header.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/sound-check-dark.png">
+    <img src="docs/images/sound-check-light.png" width="460" alt="Pre-call Sound Check showing live AirPods Pro mic and call audio meters">
+  </picture>
+</p>
 
 **Notes while you talk**
 
-- A small floating pill shows the timer and levels. Click it, or press
+- A compact floating pill shows the timer and levels. Click it, or press
   <kbd>⌥</kbd><kbd>⌘</kbd><kbd>N</kbd>, to type a note. <kbd>Return</kbd> saves a note,
   <kbd>⌘</kbd><kbd>Return</kbd> saves an action item, and an empty <kbd>Return</kbd> drops a
-  bookmark. Notes are timestamped and appear in the transcript and summary.
-- Automatically hides the pill when Zoom, Teams, or macOS screen sharing starts, and lets you
-  hide or show it anytime with <kbd>⌥</kbd><kbd>⌘</kbd><kbd>H</kbd> (or disable the pill in
-  Settings and use the menu bar + <kbd>⌥</kbd><kbd>⌘</kbd><kbd>N</kbd> on demand).
+  bookmark. Notes are timestamped and woven into Key Moments, the transcript, and the summary.
+- Automatically hides the pill when Zoom, Teams, or macOS screen sharing starts (without requiring
+  Screen Recording permission), and lets you hide or show it anytime with
+  <kbd>⌥</kbd><kbd>⌘</kbd><kbd>H</kbd>.
 
 <p align="center">
   <picture>
@@ -48,23 +64,76 @@ labels run locally with open models. There is no account, no server and no subsc
   </picture>
 </p>
 
-**After the meeting**
+**Schedule, Walk-In Prep &amp; Commitments**
 
-- Each recording is compressed, split by speaker, transcribed and summarized. Processing resumes
-  where it left off, and a failed step never deletes audio.
-- Click any word in the transcript to play from there. Summary lines jump to the moment they
-  came from.
-- Name a voice once and ReMeet suggests that name in later meetings.
+- **Calendar sync:** combines Apple Calendar (EventKit) with subscribed Google, Outlook, and iCloud
+  `.ics` feeds, deduplicated and filtered to actual online meetings so classes and desk blocks never
+  clutter your schedule.
+- **Walk-In Pre-Meeting Prep Brief:** opens before any recurring or invitee-matched meeting with
+  one-click **Join &amp; Record**, attendee cards, **Last time** decisions/summary recap, open
+  questions, and a mutual accountability check before you walk in.
+- **Commitments Radar:** aggregates open action items across meetings and elevates **For you** and
+  **Waiting on others** above collapsed **Other team items**, with `7d` / `30d` / `All` recency
+  filters, hover actions, and one-click dismissal.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/schedule-dark.png">
+    <img src="docs/images/schedule-light.png" width="820" alt="Schedule Walk-In Pre-Meeting Prep view with attendee cards, mutual accountability promises, and prior meeting recap">
+  </picture>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/commitments-dark.png">
+    <img src="docs/images/commitments-light.png" width="820" alt="Commitments Radar prioritizing For you and Waiting on others with Other team items collapsed">
+  </picture>
+</p>
+
+**People &amp; voiceprints**
+
+- **People directory (`~/ReMeet/people.json`):** builds profiles automatically from speaker names
+  and calendar invites, tracking meeting counts, spoken time, voiceprint hours, free-form context
+  notes, and shared open commitments per person.
+- **Smarter voice matching &amp; turn fixes:** matches WeSpeaker embeddings across meetings with
+  calendar-invite ranking, tracks per-meeting voiceprint contributions so fixing a mislabelled
+  speaker cleanly unlearns the wrong vector, and lets you click any turn or speaker chip to
+  assign **This turn** vs **All turns** or split out a new speaker (1–12 call speakers).
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/people-dark.png">
+    <img src="docs/images/people-light.png" width="820" alt="People profile view showing voiceprint status, stats, context notes, shared commitments, and conversation history">
+  </picture>
+</p>
+
+**Key Moments, Conversation Pulse &amp; Highlight Reel**
+
+- **Key Moments:** interactive visual cards (Pinned, Decisions, Commitments, Key Points) shown inside
+  each meeting and across your whole library in the **Moments** tab, with one-click jump to audio or
+  transcript and sequential **Highlight Reel** playback.
+- **Conversation Pulse:** clickable speaker talk-share timeline dotted with moment pins showing
+  each participant's speaking share and meeting pace.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/moments-dark.png">
+    <img src="docs/images/moments-light.png" width="820" alt="Cross-meeting Key Moments card gallery filtered by Commitments, Decisions, Pinned, and Key Points">
+  </picture>
+</p>
+
+**After the meeting &amp; AI workflows**
+
+- Resumable local processing: compress, speaker-diarize, transcribe, and summarize without ever
+  deleting audio on failure.
+- Fast `NSTextView` transcript in a user-resizable split pane (<kbd>⌘</kbd><kbd>T</kbd>) that tracks
+  window width down to narrow 3-column layouts, with click-to-play words and instant
+  <kbd>⌘</kbd><kbd>F</kbd> find.
 - Ask questions about one meeting, a folder, or everything you have recorded
-  (<kbd>⌘</kbd><kbd>L</kbd>). Answers cite the passages they came from.
-- **Copy for AI** (<kbd>⇧</kbd><kbd>⌘</kbd><kbd>C</kbd>) puts the whole meeting on the clipboard
-  as Markdown, ready to paste into any assistant.
-- **Auto-export Markdown for AI agents** (<kbd>⇧</kbd><kbd>⌘</kbd><kbd>E</kbd>): each folder can
-  point to a local directory on disk where ReMeet automatically writes and updates clean `.md`
-  files (YAML frontmatter, folder context, notes, summary, checkbox action items, and full
-  transcript) so tools like Claude Code or Cursor can read meeting context directly from disk.
-- Folders group meetings by team or project. Each folder has a context note that is passed to
-  its summaries.
+  (<kbd>⌘</kbd><kbd>L</kbd>) with hybrid SQLite FTS5 + embedding search and timestamped citations.
+- One-click **Follow-up** email composer, **Copy for AI** (<kbd>⇧</kbd><kbd>⌘</kbd><kbd>C</kbd>),
+  and **Auto-export Markdown for AI agents** (<kbd>⇧</kbd><kbd>⌘</kbd><kbd>E</kbd>) per folder
+  so tools like Claude Code or Cursor can read meeting context straight from disk.
 
 ## Models
 
@@ -82,16 +151,19 @@ Transcription is English only.
 
 ## What leaves your Mac
 
-Audio never does. Recording, speaker labels and speech recognition are entirely local, and
-meetings are plain files in `~/ReMeet/meetings`.
+Audio never leaves your Mac. Recording, speaker labels, speech recognition, Key Moments, people
+profiles, and search run locally, and meetings live as plain files in `~/ReMeet/meetings`.
 
-There is one optional exception for text. If the [Claude Code](https://claude.com/claude-code)
-command line tool is installed and signed in, ReMeet uses it to send the transcript text to
-Claude Sonnet, which fixes misheard words and writes the summary. This uses your own Claude
-login. ReMeet does not read or store any API key. Without Claude Code installed, or if the call
-fails, the on-device transcript and the local summary model are used and nothing is sent anywhere.
+Two optional features make outbound text/HTTP requests only when you opt in:
 
-The only other network traffic is the model download from Hugging Face on first launch.
+- **Claude Code text pass:** if the [Claude Code](https://claude.com/claude-code) CLI is installed
+  and signed in, ReMeet sends transcript text to Claude Sonnet for spelling cleanup and summaries
+  using your own Claude login (zero API keys stored; falls back to the local MLX model offline).
+- **Subscribed calendar feeds:** if you paste `.ics` feed URLs in Schedule or Settings, ReMeet
+  fetches read-only calendar events directly from those URLs to power reminders, attendee hints,
+  and Walk-In Prep Briefs.
+
+The only other network traffic is the initial model download from Hugging Face on first launch.
 
 ## Requirements
 
@@ -140,10 +212,11 @@ docs/                 Performance measurements and README images
 ```
 
 A meeting is a folder: `~/ReMeet/meetings/<date>_<time>_<title>/` holding the audio plus JSON
-and Markdown for notes, transcript and summary. To move your history to a new Mac, copy
-`~/ReMeet/` (`index.sqlite` and `chunks.sqlite` rebuild automatically on launch). Measured CPU,
-memory and processing times are in [docs/performance.md](docs/performance.md), and the full
-history of changes and benchmarks is in [CHANGELOG.md](CHANGELOG.md).
+and Markdown for notes, transcript and summary, alongside `~/ReMeet/people.json` and
+`~/ReMeet/voiceprints.json`. To move your history to a new Mac, copy `~/ReMeet/`
+(`index.sqlite` and `chunks.sqlite` rebuild automatically on launch). Measured CPU, memory and
+processing times are in [docs/performance.md](docs/performance.md), and the full history of
+changes and benchmarks is in [CHANGELOG.md](CHANGELOG.md).
 
 ## Status
 
