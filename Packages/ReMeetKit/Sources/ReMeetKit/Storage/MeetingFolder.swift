@@ -20,6 +20,7 @@ public struct MeetingFolder: Hashable, Sendable, Identifiable {
         case mic16k = "mic-16k.m4a"
         case system16k = "system-16k.m4a"
         case notes = "notes.json"
+        case moments = "moments.json"
         case speakers = "speakers.json"
         case diarization = "diarization.json"
         case transcript = "transcript.json"

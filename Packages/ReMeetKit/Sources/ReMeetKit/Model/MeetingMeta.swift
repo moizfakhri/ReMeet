@@ -127,6 +127,14 @@ public struct MeetingMeta: Codable, Equatable, Sendable {
     public var exportedMarkdownPath: String?
     /// Voices to find on the call audio, not counting you. Nil lets the diarizer decide.
     public var expectedCallSpeakers: Int?
+    /// Linked calendar event identifier (when recorded from or matched to Apple/Google Calendar).
+    public var calendarEventID: String?
+    /// Participants from the linked calendar event, used to seed People profiles and boost speaker matching.
+    public var calendarAttendees: [CalendarAttendee] = []
+    /// Video call join URL from the linked calendar event, if any.
+    public var calendarJoinURL: String?
+    /// Name of the calendar this meeting came from (e.g. "Work (Google)").
+    public var calendarName: String?
     public var startHostTime: UInt64?
     public var clock: String?
     public var devices: Devices
@@ -146,7 +154,9 @@ public struct MeetingMeta: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, app, title, titleIsUserSet, status, failure, startTime, endTime, durationSeconds
-        case sourceApp, collectionID, exportedMarkdownPath, expectedCallSpeakers, startHostTime, clock, devices, mic, system, events, processing
+        case sourceApp, collectionID, exportedMarkdownPath, expectedCallSpeakers
+        case calendarEventID, calendarAttendees, calendarJoinURL, calendarName
+        case startHostTime, clock, devices, mic, system, events, processing
     }
 
     public init(from decoder: Decoder) throws {
@@ -167,6 +177,10 @@ public struct MeetingMeta: Codable, Equatable, Sendable {
         exportedMarkdownPath = try c.decodeIfPresent(String.self, forKey: .exportedMarkdownPath)
         let speakers = try c.decodeIfPresent(Int.self, forKey: .expectedCallSpeakers)
         expectedCallSpeakers = speakers.flatMap { (1...8).contains($0) ? $0 : nil }
+        calendarEventID = try c.decodeIfPresent(String.self, forKey: .calendarEventID)
+        calendarAttendees = try c.decodeIfPresent([CalendarAttendee].self, forKey: .calendarAttendees) ?? []
+        calendarJoinURL = try c.decodeIfPresent(String.self, forKey: .calendarJoinURL)
+        calendarName = try c.decodeIfPresent(String.self, forKey: .calendarName)
         startHostTime = try c.decodeIfPresent(UInt64.self, forKey: .startHostTime)
         clock = try c.decodeIfPresent(String.self, forKey: .clock)
         devices = try c.decodeIfPresent(Devices.self, forKey: .devices) ?? .init()

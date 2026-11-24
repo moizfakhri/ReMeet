@@ -53,7 +53,7 @@ public enum SummaryPrompt {
       "title": "short meeting title, 3 to 7 words",
       "summary": [{"text": "one sentence", "t": "mm:ss where it was discussed"}],
       "decisions": [{"text": "decision", "t": "mm:ss"}],
-      "action_items": [{"owner": "name or null", "task": "what to do", "due": "when, or null", "t": "mm:ss"}],
+      "action_items": [{"owner": "name or null", "task": "what to do", "due": "when, or null", "t": "mm:ss", "relates_to_me": true}],
       "open_questions": [{"text": "question left open", "t": "mm:ss"}],
       "your_notes": [{"t": "mm:ss of the note", "note": "the note exactly as written", "context": "what was said around it, one or two sentences"}]
     }
@@ -95,7 +95,7 @@ public enum SummaryPrompt {
         out.append("")
         out.append("Return JSON in exactly this shape:")
         out.append(schemaDescription)
-        out.append("Rules: 3 to 6 summary sentences, most important first. Leave a list empty if there is nothing for it. Use the transcript's [mm:ss] times for \"t\". An action item's owner is the person who agreed to do it.")
+        out.append("Rules: 3 to 6 summary sentences, most important first. Leave a list empty if there is nothing for it. Use the transcript's [mm:ss] times for \"t\". An action item's owner is the person who agreed to do it. Set \"relates_to_me\": true on an action item only when the owner is the person who recorded this OR the task directly delivers something to, unblocks, or depends on them; false otherwise.")
         let custom = input.customInstructions.trimmingCharacters(in: .whitespacesAndNewlines)
         if !custom.isEmpty { out.append("Also: \(custom)") }
         return out.joined(separator: "\n")

@@ -78,8 +78,15 @@ public enum SummaryParser {
         return list.compactMap { item in
             if let s = string(item) { return ActionItem(task: s) }
             guard let dict = item as? [String: Any], let task = string(dict["task"] ?? dict["text"]) else { return nil }
-            return ActionItem(owner: string(dict["owner"]), task: task, due: string(dict["due"]),
-                              done: (dict["done"] as? Bool) ?? false, t: time(dict["t"] ?? dict["time"]))
+            let relates = (dict["relates_to_me"] as? Bool) ?? (dict["relatesToMe"] as? Bool)
+            let dismissed = (dict["dismissed"] as? Bool) ?? false
+            return ActionItem(owner: string(dict["owner"]),
+                              task: task,
+                              due: string(dict["due"]),
+                              done: (dict["done"] as? Bool) ?? false,
+                              t: time(dict["t"] ?? dict["time"]),
+                              relatesToMe: relates,
+                              dismissed: dismissed)
         }
     }
 

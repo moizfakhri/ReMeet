@@ -144,14 +144,52 @@ public struct ActionItem: Codable, Equatable, Sendable, Identifiable {
     public var due: String?
     public var done: Bool
     public var t: Double?
+    public var relatesToMe: Bool?
+    public var dismissed: Bool
     public var id: String { "\(owner ?? "-"):\(due ?? "-"):\(t.map { String($0) } ?? "-"):\(task)" }
 
-    public init(owner: String? = nil, task: String, due: String? = nil, done: Bool = false, t: Double? = nil) {
+    public init(owner: String? = nil,
+                task: String,
+                due: String? = nil,
+                done: Bool = false,
+                t: Double? = nil,
+                relatesToMe: Bool? = nil,
+                dismissed: Bool = false) {
         self.owner = owner
         self.task = task
         self.due = due
         self.done = done
         self.t = t
+        self.relatesToMe = relatesToMe
+        self.dismissed = dismissed
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case owner, task, due, done, t
+        case relatesToMe = "relates_to_me"
+        case dismissed
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        owner = try c.decodeIfPresent(String.self, forKey: .owner)
+        task = try c.decode(String.self, forKey: .task)
+        due = try c.decodeIfPresent(String.self, forKey: .due)
+        done = try c.decodeIfPresent(Bool.self, forKey: .done) ?? false
+        t = try c.decodeIfPresent(Double.self, forKey: .t)
+        relatesToMe = try c.decodeIfPresent(Bool.self, forKey: .relatesToMe)
+        dismissed = try c.decodeIfPresent(Bool.self, forKey: .dismissed) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(owner, forKey: .owner)
+        try c.encode(task, forKey: .task)
+        try c.encodeIfPresent(due, forKey: .due)
+        try c.encode(done, forKey: .done)
+        try c.encodeIfPresent(t, forKey: .t)
+        try c.encodeIfPresent(relatesToMe, forKey: .relatesToMe)
+        if dismissed { try c.encode(true, forKey: .dismissed) }
     }
 }
 

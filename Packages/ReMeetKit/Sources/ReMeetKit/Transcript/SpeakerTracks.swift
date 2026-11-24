@@ -96,11 +96,20 @@ public enum RecorderName {
 /// Names handed to Sonnet with the transcript text. The on-device speech model never sees this:
 /// it only receives audio from the mic track and the call track.
 public enum NameGlossary {
-    public static func context(recorderName: String, speakers: SpeakerNames, segments: [TranscriptSegment]) -> String {
+    public static func context(recorderName: String,
+                               speakers: SpeakerNames,
+                               segments: [TranscriptSegment],
+                               attendeeNames: [String] = []) -> String {
         var lines: [String] = []
         let name = recorderName.trimmingCharacters(in: .whitespacesAndNewlines)
         if !name.isEmpty {
             lines.append("The person who recorded this meeting is named \(name). Spell that name exactly \"\(name)\" wherever it is spoken, including inside someone else's sentence. A speech draft often mishears it. Lines whose speaker id is \(SpeakerNames.youID) are \(name).")
+        }
+        let invitees = attendeeNames
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && !SpeakerMemory.isPlaceholder($0) }
+        if !invitees.isEmpty {
+            lines.append("Calendar invitees for this meeting (use these exact name spellings when spoken): \(invitees.joined(separator: ", ")).")
         }
         var seen: [String] = []
         for segment in segments where !seen.contains(segment.speaker) {
