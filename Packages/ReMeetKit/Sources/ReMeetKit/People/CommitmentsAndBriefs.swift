@@ -213,11 +213,13 @@ public struct MeetingPrepBrief: Equatable, Sendable {
                              people: [PersonSummary],
                              recorderName: String = "",
                              now: Date = Date()) -> MeetingPrepBrief {
-        let matchedPeople = event.attendees
-            .filter { $0.status != .declined }
-            .compactMap { att in
-                people.first { $0.profile.matchesAttendee(att) }
+        var matchedPeople: [PersonSummary] = []
+        for att in event.attendees where att.status != .declined {
+            if let match = people.first(where: { $0.profile.matchesAttendee(att) }),
+               !matchedPeople.contains(where: { $0.id == match.id }) {
+                matchedPeople.append(match)
             }
+        }
 
         let targetSeries = event.seriesKey
         let attendeeProfiles = matchedPeople.map(\.profile)

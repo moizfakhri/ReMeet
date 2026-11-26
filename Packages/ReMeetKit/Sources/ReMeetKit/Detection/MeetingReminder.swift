@@ -28,7 +28,8 @@ public struct CalendarAttendee: Codable, Equatable, Sendable, Hashable, Identifi
         if trimmedName.isEmpty || trimmedName.contains("@"), let normalizedEmail {
             self.name = Self.humanizedName(fromEmail: normalizedEmail)
         } else {
-            self.name = trimmedName
+            let normalized = PersonName.parse(trimmedName).canonicalDisplayName
+            self.name = normalized.isEmpty ? trimmedName : normalized
         }
         self.email = normalizedEmail
         self.isOrganizer = isOrganizer

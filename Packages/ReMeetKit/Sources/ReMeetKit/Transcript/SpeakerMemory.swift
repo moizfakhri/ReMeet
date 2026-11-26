@@ -82,15 +82,69 @@ public struct SpeakerMemory: Codable, Equatable, Sendable {
     }
 
     public static func namesMatch(_ a: String, _ b: String) -> Bool {
-        let na = a.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let nb = b.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let na = a.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nb = b.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !na.isEmpty, !nb.isEmpty else { return false }
-        if na == nb { return true }
-        // Match first-name voiceprint ("Priya") against full calendar name ("Priya Patel") when unambiguous.
-        let aParts = na.split(whereSeparator: \.isWhitespace).map(String.init)
-        let bParts = nb.split(whereSeparator: \.isWhitespace).map(String.init)
-        if aParts.count == 1, let first = bParts.first, first == na, na.count >= 3 { return true }
-        if bParts.count == 1, let first = aParts.first, first == nb, nb.count >= 3 { return true }
+        if na.caseInsensitiveCompare(nb) == .orderedSame { return true }
+
+        let pa = PersonName.parse(na)
+        let pb = PersonName.parse(nb)
+        let ca = pa.canonicalDisplayName
+        let cb = pb.canonicalDisplayName
+        if !ca.isEmpty, ca.caseInsensitiveCompare(cb) == .orderedSame { return true }
+
+        let aFirst = PersonName.normalizedToken(pa.first)
+        let bFirst = PersonName.normalizedToken(pb.first)
+        let aLast = PersonName.normalizedToken(pa.last)
+        let bLast = PersonName.normalizedToken(pb.last)
+
+        // Both have first + last: ignore middle names/initials and honorifics.
+        if !aFirst.isEmpty, !aLast.isEmpty, !bFirst.isEmpty, !bLast.isEmpty {
+            return aFirst == bFirst && aLast == bLast
+        }
+
+        // Honorific + last name ("Dr. Patel") matches full name with same last name ("Patel, Priya R").
+        if pa.isHonorificLastName, aLast.count >= 3, !bLast.isEmpty, aLast == bLast {
+            return true
+        }
+        if pb.isHonorificLastName, bLast.count >= 3, !aLast.isEmpty, aLast == bLast {
+            return true
+        }
+
+        // Single first-name token ("Elena", "Jordan", "Marco") matches first name of a fuller name.
+        if !pa.isHonorificLastName, pa.tokens.count == 1, aFirst.count >= 3, !bFirst.isEmpty, aFirst == bFirst {
+            return true
+        }
+        if !pb.isHonorificLastName, pb.tokens.count == 1, bFirst.count >= 3, !aFirst.isEmpty, aFirst == bFirst {
+            return true
+        }
+
+        return false
+    }
+
+    /// Unambiguous nickname/prefix match (e.g. `"Alex"` <-> `"Alvarez, Alexander J"`),
+    /// only used when uniquely disambiguated by a calendar attendee list or `PeopleStore`.
+    public static func namesPrefixMatch(_ a: String, _ b: String) -> Bool {
+        if namesMatch(a, b) { return true }
+        let pa = PersonName.parse(a)
+        let pb = PersonName.parse(b)
+        let aFirst = PersonName.normalizedToken(pa.first)
+        let bFirst = PersonName.normalizedToken(pb.first)
+        let aLast = PersonName.normalizedToken(pa.last)
+        let bLast = PersonName.normalizedToken(pb.last)
+
+        if !pa.isHonorificLastName, pa.tokens.count == 1, aFirst.count >= 4, !bFirst.isEmpty, bFirst.hasPrefix(aFirst) {
+            return true
+        }
+        if !pb.isHonorificLastName, pb.tokens.count == 1, bFirst.count >= 4, !aFirst.isEmpty, aFirst.hasPrefix(bFirst) {
+            return true
+        }
+        if !pa.isHonorificLastName, pa.tokens.count == 1, aFirst.count >= 4, !bLast.isEmpty, aFirst == bLast {
+            return true
+        }
+        if !pb.isHonorificLastName, pb.tokens.count == 1, bFirst.count >= 4, !aLast.isEmpty, bFirst == aLast {
+            return true
+        }
         return false
     }
 

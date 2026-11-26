@@ -135,6 +135,10 @@ public struct MeetingMeta: Codable, Equatable, Sendable {
     public var calendarJoinURL: String?
     /// Name of the calendar this meeting came from (e.g. "Work (Google)").
     public var calendarName: String?
+    /// Per-meeting override for Apple Reminders list (`EKCalendar.calendarIdentifier`).
+    public var remindersListID: String?
+    /// Display name of the per-meeting Apple Reminders list override.
+    public var remindersListName: String?
     public var startHostTime: UInt64?
     public var clock: String?
     public var devices: Devices
@@ -156,6 +160,7 @@ public struct MeetingMeta: Codable, Equatable, Sendable {
         case schemaVersion, app, title, titleIsUserSet, status, failure, startTime, endTime, durationSeconds
         case sourceApp, collectionID, exportedMarkdownPath, expectedCallSpeakers
         case calendarEventID, calendarAttendees, calendarJoinURL, calendarName
+        case remindersListID, remindersListName
         case startHostTime, clock, devices, mic, system, events, processing
     }
 
@@ -181,6 +186,8 @@ public struct MeetingMeta: Codable, Equatable, Sendable {
         calendarAttendees = try c.decodeIfPresent([CalendarAttendee].self, forKey: .calendarAttendees) ?? []
         calendarJoinURL = try c.decodeIfPresent(String.self, forKey: .calendarJoinURL)
         calendarName = try c.decodeIfPresent(String.self, forKey: .calendarName)
+        remindersListID = try c.decodeIfPresent(String.self, forKey: .remindersListID)
+        remindersListName = try c.decodeIfPresent(String.self, forKey: .remindersListName)
         startHostTime = try c.decodeIfPresent(UInt64.self, forKey: .startHostTime)
         clock = try c.decodeIfPresent(String.self, forKey: .clock)
         devices = try c.decodeIfPresent(Devices.self, forKey: .devices) ?? .init()

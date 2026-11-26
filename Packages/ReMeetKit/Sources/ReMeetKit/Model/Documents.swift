@@ -146,6 +146,10 @@ public struct ActionItem: Codable, Equatable, Sendable, Identifiable {
     public var t: Double?
     public var relatesToMe: Bool?
     public var dismissed: Bool
+    public var reminderID: String?
+    public var reminderListID: String?
+    public var reminderListName: String?
+    public var reminderListPinned: Bool
     public var id: String { "\(owner ?? "-"):\(due ?? "-"):\(t.map { String($0) } ?? "-"):\(task)" }
 
     public init(owner: String? = nil,
@@ -154,7 +158,11 @@ public struct ActionItem: Codable, Equatable, Sendable, Identifiable {
                 done: Bool = false,
                 t: Double? = nil,
                 relatesToMe: Bool? = nil,
-                dismissed: Bool = false) {
+                dismissed: Bool = false,
+                reminderID: String? = nil,
+                reminderListID: String? = nil,
+                reminderListName: String? = nil,
+                reminderListPinned: Bool = false) {
         self.owner = owner
         self.task = task
         self.due = due
@@ -162,12 +170,20 @@ public struct ActionItem: Codable, Equatable, Sendable, Identifiable {
         self.t = t
         self.relatesToMe = relatesToMe
         self.dismissed = dismissed
+        self.reminderID = reminderID
+        self.reminderListID = reminderListID
+        self.reminderListName = reminderListName
+        self.reminderListPinned = reminderListPinned
     }
 
     enum CodingKeys: String, CodingKey {
         case owner, task, due, done, t
         case relatesToMe = "relates_to_me"
         case dismissed
+        case reminderID = "reminder_id"
+        case reminderListID = "reminder_list_id"
+        case reminderListName = "reminder_list_name"
+        case reminderListPinned = "reminder_list_pinned"
     }
 
     public init(from decoder: Decoder) throws {
@@ -179,6 +195,10 @@ public struct ActionItem: Codable, Equatable, Sendable, Identifiable {
         t = try c.decodeIfPresent(Double.self, forKey: .t)
         relatesToMe = try c.decodeIfPresent(Bool.self, forKey: .relatesToMe)
         dismissed = try c.decodeIfPresent(Bool.self, forKey: .dismissed) ?? false
+        reminderID = try c.decodeIfPresent(String.self, forKey: .reminderID)
+        reminderListID = try c.decodeIfPresent(String.self, forKey: .reminderListID)
+        reminderListName = try c.decodeIfPresent(String.self, forKey: .reminderListName)
+        reminderListPinned = try c.decodeIfPresent(Bool.self, forKey: .reminderListPinned) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -190,6 +210,10 @@ public struct ActionItem: Codable, Equatable, Sendable, Identifiable {
         try c.encodeIfPresent(t, forKey: .t)
         try c.encodeIfPresent(relatesToMe, forKey: .relatesToMe)
         if dismissed { try c.encode(true, forKey: .dismissed) }
+        try c.encodeIfPresent(reminderID, forKey: .reminderID)
+        try c.encodeIfPresent(reminderListID, forKey: .reminderListID)
+        try c.encodeIfPresent(reminderListName, forKey: .reminderListName)
+        if reminderListPinned { try c.encode(true, forKey: .reminderListPinned) }
     }
 }
 

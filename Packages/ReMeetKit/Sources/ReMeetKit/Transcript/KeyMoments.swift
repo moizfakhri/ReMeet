@@ -490,7 +490,7 @@ public struct ConversationPulse: Equatable, Sendable {
         }
 
         let totalSpeech = max(secondsBySpeaker.values.reduce(0, +), 0.1)
-        var shares: [SpeakerShare] = order.map { id in
+        let rawShares: [SpeakerShare] = order.map { id in
             let name = speakers.displayName(for: id)
             let isYou = id == SpeakerNames.youID
             let secs = secondsBySpeaker[id] ?? 0
@@ -505,6 +505,30 @@ public struct ConversationPulse: Equatable, Sendable {
                 hueIndex: isYou ? 0 : PersonProfile.stableHueIndex(for: name)
             )
         }
+        // Merge multiple speaker IDs that resolve to the same display name (e.g. speaker_1 & speaker_2 both "Dr. Patel").
+        var mergedShares: [SpeakerShare] = []
+        for share in rawShares {
+            if !share.isYou, !SpeakerMemory.isPlaceholder(share.name),
+               let idx = mergedShares.firstIndex(where: {
+                   !$0.isYou && $0.name.caseInsensitiveCompare(share.name) == .orderedSame
+               }) {
+                let prev = mergedShares[idx]
+                let combinedSecs = prev.seconds + share.seconds
+                mergedShares[idx] = SpeakerShare(
+                    speakerID: prev.speakerID,
+                    name: prev.name,
+                    seconds: combinedSecs,
+                    fraction: combinedSecs / totalSpeech,
+                    words: prev.words + share.words,
+                    turns: prev.turns + share.turns,
+                    isYou: false,
+                    hueIndex: prev.hueIndex
+                )
+            } else {
+                mergedShares.append(share)
+            }
+        }
+        var shares = mergedShares
         shares.sort { a, b in
             if a.seconds != b.seconds { return a.seconds > b.seconds }
             return a.isYou && !b.isYou

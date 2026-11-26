@@ -11,16 +11,33 @@ public struct MeetingCollection: Codable, Equatable, Identifiable, Sendable {
     public var context: String
     /// Optional local directory path where meetings in this folder auto-export as `.md` files.
     public var exportDirectoryPath: String?
+    /// Optional Apple Reminders list identifier (`EKCalendar.calendarIdentifier`) for meetings in this folder.
+    public var remindersListID: String?
+    /// Display name of the assigned Apple Reminders list (for offline UI & fallback).
+    public var remindersListName: String?
+    /// When true, action items from meetings in this folder do not auto-sync to Apple Reminders.
+    public var remindersDisabled: Bool
 
-    public init(id: String = UUID().uuidString, name: String, context: String = "",
-                exportDirectoryPath: String? = nil) {
+    public init(id: String = UUID().uuidString,
+                name: String,
+                context: String = "",
+                exportDirectoryPath: String? = nil,
+                remindersListID: String? = nil,
+                remindersListName: String? = nil,
+                remindersDisabled: Bool = false) {
         self.id = id
         self.name = name
         self.context = context
         self.exportDirectoryPath = exportDirectoryPath
+        self.remindersListID = remindersListID
+        self.remindersListName = remindersListName
+        self.remindersDisabled = remindersDisabled
     }
 
-    private enum CodingKeys: String, CodingKey { case id, name, context, exportDirectoryPath }
+    private enum CodingKeys: String, CodingKey {
+        case id, name, context, exportDirectoryPath
+        case remindersListID, remindersListName, remindersDisabled
+    }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -29,6 +46,11 @@ public struct MeetingCollection: Codable, Equatable, Identifiable, Sendable {
         context = try c.decodeIfPresent(String.self, forKey: .context) ?? ""
         let raw = try c.decodeIfPresent(String.self, forKey: .exportDirectoryPath)?.trimmingCharacters(in: .whitespacesAndNewlines)
         exportDirectoryPath = (raw?.isEmpty == false) ? raw : nil
+        let rawListID = try c.decodeIfPresent(String.self, forKey: .remindersListID)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        remindersListID = (rawListID?.isEmpty == false) ? rawListID : nil
+        let rawListName = try c.decodeIfPresent(String.self, forKey: .remindersListName)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        remindersListName = (rawListName?.isEmpty == false) ? rawListName : nil
+        remindersDisabled = try c.decodeIfPresent(Bool.self, forKey: .remindersDisabled) ?? false
     }
 }
 

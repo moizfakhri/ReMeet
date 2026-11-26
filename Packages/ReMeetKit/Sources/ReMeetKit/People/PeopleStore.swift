@@ -120,11 +120,40 @@ public struct PeopleStore: Codable, Equatable, Sendable {
     }
 
     public func find(named name: String, email: String? = nil) -> PersonProfile? {
-        if let email = email?.lowercased(), !email.isEmpty,
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let email = email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !email.isEmpty,
            let byEmail = profiles.first(where: { $0.email?.lowercased() == email }) {
             return byEmail
         }
-        return profiles.first { $0.matchesName(name) }
+        guard !trimmed.isEmpty, !SpeakerMemory.isPlaceholder(trimmed) else { return nil }
+        let canon = PersonName.parse(trimmed).canonicalDisplayName
+        if let exact = profiles.first(where: {
+            $0.name.caseInsensitiveCompare(trimmed) == .orderedSame
+                || $0.name.caseInsensitiveCompare(canon) == .orderedSame
+                || $0.aliases.contains(where: {
+                    $0.caseInsensitiveCompare(trimmed) == .orderedSame
+                        || $0.caseInsensitiveCompare(canon) == .orderedSame
+                })
+        }) {
+            return exact
+        }
+        let nameMatches = profiles.filter { $0.matchesName(trimmed) }
+        if nameMatches.count == 1 { return nameMatches[0] }
+        if nameMatches.count > 1 { return nameMatches.first }
+        let prefixMatches = profiles.filter {
+            SpeakerMemory.namesPrefixMatch($0.name, trimmed)
+                || $0.aliases.contains { SpeakerMemory.namesPrefixMatch($0, trimmed) }
+        }
+        return prefixMatches.count == 1 ? prefixMatches[0] : nil
+    }
+
+    private static func appendAlias(_ candidate: String, to aliases: inout [String], excluding displayName: String) {
+        let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !SpeakerMemory.isPlaceholder(trimmed) else { return }
+        guard trimmed.caseInsensitiveCompare(displayName) != .orderedSame else { return }
+        if !aliases.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+            aliases.append(trimmed)
+        }
     }
 
     /// Creates or enriches a profile when a speaker is named or a calendar attendee is seen.
@@ -137,22 +166,46 @@ public struct PeopleStore: Codable, Equatable, Sendable {
                                 now: Date = Date()) -> PersonProfile? {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !SpeakerMemory.isPlaceholder(trimmed) else { return nil }
+        let parsed = PersonName.parse(trimmed)
+        let canonical = parsed.canonicalDisplayName.isEmpty ? trimmed : parsed.canonicalDisplayName
 
         let cleanEmail = email?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let index = profiles.firstIndex(where: {
-            if let e = cleanEmail?.lowercased(), !e.isEmpty, $0.email?.lowercased() == e { return true }
-            return $0.name.compare(trimmed, options: .caseInsensitive) == .orderedSame
-                || $0.aliases.contains(where: { $0.compare(trimmed, options: .caseInsensitive) == .orderedSame })
-        }) {
-            var existing = profiles[index]
-            // Upgrade single-word name ("Priya") to full name ("Priya Patel") if matched by alias/email, keeping alias.
-            if !existing.name.contains(" "), trimmed.contains(" "),
-               SpeakerMemory.namesMatch(existing.name, trimmed) {
-                if !existing.aliases.contains(where: { $0.caseInsensitiveCompare(existing.name) == .orderedSame }) {
-                    existing.aliases.append(existing.name)
-                }
-                existing.name = trimmed
+
+        let matchedIndex: Int? = {
+            if let e = cleanEmail?.lowercased(), !e.isEmpty,
+               let idx = profiles.firstIndex(where: { $0.email?.lowercased() == e }) {
+                return idx
             }
+            if let idx = profiles.firstIndex(where: {
+                $0.name.compare(trimmed, options: .caseInsensitive) == .orderedSame
+                    || $0.name.compare(canonical, options: .caseInsensitive) == .orderedSame
+                    || $0.aliases.contains(where: {
+                        $0.compare(trimmed, options: .caseInsensitive) == .orderedSame
+                            || $0.compare(canonical, options: .caseInsensitive) == .orderedSame
+                    })
+            }) {
+                return idx
+            }
+            let nameIndices = profiles.indices.filter { profiles[$0].matchesName(trimmed) }
+            if nameIndices.count == 1 { return nameIndices[0] }
+            let prefixIndices = profiles.indices.filter { idx in
+                SpeakerMemory.namesPrefixMatch(profiles[idx].name, trimmed)
+                    || profiles[idx].aliases.contains { SpeakerMemory.namesPrefixMatch($0, trimmed) }
+            }
+            if prefixIndices.count == 1 { return prefixIndices[0] }
+            return nil
+        }()
+
+        if let index = matchedIndex {
+            var existing = profiles[index]
+            let oldName = existing.name
+            let mergedName = PersonName.preferredMergedDisplayName(existing: oldName, incoming: canonical)
+            existing.name = mergedName
+            existing.aliases.removeAll { $0.caseInsensitiveCompare(mergedName) == .orderedSame }
+            Self.appendAlias(oldName, to: &existing.aliases, excluding: mergedName)
+            Self.appendAlias(trimmed, to: &existing.aliases, excluding: mergedName)
+            Self.appendAlias(canonical, to: &existing.aliases, excluding: mergedName)
+
             if existing.email == nil, let cleanEmail, !cleanEmail.isEmpty { existing.email = cleanEmail }
             if let role, !role.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 existing.role = role.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -168,29 +221,9 @@ public struct PeopleStore: Codable, Equatable, Sendable {
             return existing
         }
 
-        // Also check first-name match if email gives a fuller name for an existing single-name profile.
-        if let index = profiles.firstIndex(where: { SpeakerMemory.namesMatch($0.name, trimmed) }),
-           profiles.filter({ SpeakerMemory.namesMatch($0.name, trimmed) }).count == 1 {
-            var existing = profiles[index]
-            if !existing.name.contains(" "), trimmed.contains(" ") {
-                if !existing.aliases.contains(where: { $0.caseInsensitiveCompare(existing.name) == .orderedSame }) {
-                    existing.aliases.append(existing.name)
-                }
-                existing.name = trimmed
-            } else if existing.name.caseInsensitiveCompare(trimmed) != .orderedSame,
-                      !existing.aliases.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
-                existing.aliases.append(trimmed)
-            }
-            if existing.email == nil, let cleanEmail, !cleanEmail.isEmpty { existing.email = cleanEmail }
-            if existing.organization == nil, let organization, !organization.isEmpty { existing.organization = organization }
-            if let role, !role.isEmpty { existing.role = role }
-            if let notes { existing.notes = notes }
-            existing.updatedAt = now
-            profiles[index] = existing
-            return existing
-        }
-
-        let created = PersonProfile(name: trimmed, email: cleanEmail, role: role,
+        var initialAliases: [String] = []
+        Self.appendAlias(trimmed, to: &initialAliases, excluding: canonical)
+        let created = PersonProfile(name: canonical, aliases: initialAliases, email: cleanEmail, role: role,
                                     organization: organization, notes: notes ?? "",
                                     createdAt: now, updatedAt: now)
         profiles.append(created)
@@ -230,11 +263,13 @@ public struct PeopleStore: Codable, Equatable, Sendable {
               let tIdx = profiles.firstIndex(where: { $0.id == targetID }) else { return nil }
         let source = profiles[sIdx]
         var target = profiles[tIdx]
+        let oldTargetName = target.name
+        let mergedName = PersonName.preferredMergedDisplayName(existing: oldTargetName, incoming: source.name)
+        target.name = mergedName
+        target.aliases.removeAll { $0.caseInsensitiveCompare(mergedName) == .orderedSame }
+        Self.appendAlias(oldTargetName, to: &target.aliases, excluding: mergedName)
         for candidate in [source.name] + source.aliases {
-            if candidate.caseInsensitiveCompare(target.name) != .orderedSame,
-               !target.aliases.contains(where: { $0.caseInsensitiveCompare(candidate) == .orderedSame }) {
-                target.aliases.append(candidate)
-            }
+            Self.appendAlias(candidate, to: &target.aliases, excluding: mergedName)
         }
         if target.email == nil { target.email = source.email }
         if target.role == nil { target.role = source.role }
@@ -251,6 +286,113 @@ public struct PeopleStore: Codable, Equatable, Sendable {
     public mutating func remove(_ id: String) -> PersonProfile? {
         guard let idx = profiles.firstIndex(where: { $0.id == id }) else { return nil }
         return profiles.remove(at: idx)
+    }
+
+    /// Consolidates duplicate profiles created by `"Last, First"` calendar attendees vs manual speaker names
+    /// (e.g. `"Dr. Patel"` + `"Patel, Priya R"` -> `"Dr. Priya R Patel"`).
+    @discardableResult
+    public mutating func consolidateDuplicates(now: Date = Date()) -> Bool {
+        let before = profiles
+
+        // 1. Normalize any raw "Last, First" or ALL-CAPS display names already stored in people.json.
+        for idx in profiles.indices {
+            let raw = profiles[idx].name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let canonical = PersonName.parse(raw).canonicalDisplayName
+            if !canonical.isEmpty, canonical != raw {
+                profiles[idx].name = canonical
+                profiles[idx].aliases.removeAll { $0.caseInsensitiveCompare(canonical) == .orderedSame }
+                Self.appendAlias(raw, to: &profiles[idx].aliases, excluding: canonical)
+                profiles[idx].updatedAt = now
+            }
+        }
+
+        // 2. Iteratively merge unambiguous duplicates until fixed point.
+        var didMerge = true
+        while didMerge {
+            didMerge = false
+            outer: for i in profiles.indices {
+                for j in profiles.indices where j > i {
+                    let a = profiles[i]
+                    let b = profiles[j]
+                    if shouldAutoMerge(a, b) {
+                        let (sourceID, targetID) = preferredMergeDirection(a, b)
+                        _ = merge(sourceID: sourceID, into: targetID, now: now)
+                        didMerge = true
+                        break outer
+                    }
+                }
+            }
+        }
+
+        return profiles != before
+    }
+
+    /// Ambiguous possible duplicates for a profile (e.g. `"David"` when multiple `"David ..."` profiles exist),
+    /// surfaced as a 1-click merge suggestion in the People detail view.
+    public func possibleDuplicates(for profileID: String) -> [PersonProfile] {
+        guard let target = profiles.first(where: { $0.id == profileID }) else { return [] }
+        return profiles.filter { other in
+            guard other.id != target.id else { return false }
+            return target.matchesName(other.name)
+                || other.matchesName(target.name)
+                || SpeakerMemory.namesPrefixMatch(target.name, other.name)
+        }
+    }
+
+    private func shouldAutoMerge(_ a: PersonProfile, _ b: PersonProfile) -> Bool {
+        if let ea = a.email?.lowercased(), !ea.isEmpty,
+           let eb = b.email?.lowercased(), !eb.isEmpty, ea == eb {
+            return true
+        }
+        let pa = PersonName.parse(a.name)
+        let pb = PersonName.parse(b.name)
+        let aFull = !pa.first.isEmpty && !pa.last.isEmpty
+        let bFull = !pb.first.isEmpty && !pb.last.isEmpty
+
+        if aFull && bFull {
+            let af = PersonName.normalizedToken(pa.first)
+            let al = PersonName.normalizedToken(pa.last)
+            let bf = PersonName.normalizedToken(pb.first)
+            let bl = PersonName.normalizedToken(pb.last)
+            return af == bf && al == bl
+        }
+
+        // One short/honorific profile and one fuller profile: auto-merge ONLY if globally unambiguous.
+        if aFull != bFull {
+            let short = aFull ? b : a
+            let full = aFull ? a : b
+            let fullerProfiles = profiles.filter {
+                let p = PersonName.parse($0.name)
+                return !p.first.isEmpty && !p.last.isEmpty
+            }
+            let exactShortMatches = fullerProfiles.filter { $0.matchesName(short.name) || short.matchesName($0.name) }
+            if exactShortMatches.count == 1, exactShortMatches[0].id == full.id {
+                return true
+            }
+            if exactShortMatches.isEmpty {
+                let prefixMatches = fullerProfiles.filter {
+                    SpeakerMemory.namesPrefixMatch($0.name, short.name)
+                        || $0.aliases.contains { SpeakerMemory.namesPrefixMatch($0, short.name) }
+                }
+                if prefixMatches.count == 1, prefixMatches[0].id == full.id {
+                    return true
+                }
+            }
+            return false
+        }
+
+        return a.name.caseInsensitiveCompare(b.name) == .orderedSame
+            || a.aliases.contains(where: { $0.caseInsensitiveCompare(b.name) == .orderedSame })
+            || b.aliases.contains(where: { $0.caseInsensitiveCompare(a.name) == .orderedSame })
+    }
+
+    private func preferredMergeDirection(_ a: PersonProfile, _ b: PersonProfile) -> (sourceID: String, targetID: String) {
+        let pa = PersonName.parse(a.name)
+        let pb = PersonName.parse(b.name)
+        let aScore = ((!pa.first.isEmpty && !pa.last.isEmpty) ? 4 : 0) + (a.email != nil ? 2 : 0) + (a.notes.isEmpty ? 0 : 1)
+        let bScore = ((!pb.first.isEmpty && !pb.last.isEmpty) ? 4 : 0) + (b.email != nil ? 2 : 0) + (b.notes.isEmpty ? 0 : 1)
+        if bScore > aScore { return (a.id, b.id) }
+        return (b.id, a.id)
     }
 
     /// Automatically seeds/enriches People profiles from non-declined calendar attendees of real online meetings.
@@ -349,10 +491,10 @@ public struct MeetingSnapshot: Equatable, Sendable, Identifiable {
         }
 
         var names: [String] = []
-        for (_, name) in speakers.names {
+        for (id, name) in speakers.names where id != SpeakerNames.youID {
             let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
             if !SpeakerMemory.isPlaceholder(trimmed),
-               !names.contains(where: { $0.caseInsensitiveCompare(trimmed) == .orderedSame }) {
+               !names.contains(where: { SpeakerMemory.namesMatch($0, trimmed) }) {
                 names.append(trimmed)
             }
         }
@@ -444,20 +586,21 @@ public enum PeopleDirectory {
 
         // Ensure every voiceprint in SpeakerMemory and every named speaker in meetings appears as a Person!
         for voice in memory.voices {
-            if !myName.isEmpty, voice.name.caseInsensitiveCompare(myName) == .orderedSame { continue }
+            if !myName.isEmpty, SpeakerMemory.namesMatch(voice.name, myName) { continue }
             _ = working.upsert(name: voice.name, now: voice.updated)
         }
         for snap in snapshots {
             for att in snap.meta.calendarAttendees where att.status != .declined {
-                if !myName.isEmpty, att.name.caseInsensitiveCompare(myName) == .orderedSame { continue }
+                if !myName.isEmpty, SpeakerMemory.namesMatch(att.name, myName) { continue }
                 _ = working.upsert(name: att.name, email: att.email, organization: att.inferredOrganization, now: snap.meta.startTime)
             }
-            for (_, speakerName) in snap.speakers.names {
-                if !myName.isEmpty, speakerName.caseInsensitiveCompare(myName) == .orderedSame { continue }
+            for (speakerID, speakerName) in snap.speakers.names where speakerID != SpeakerNames.youID {
+                if !myName.isEmpty, SpeakerMemory.namesMatch(speakerName, myName) { continue }
                 _ = working.upsert(name: speakerName, now: snap.meta.startTime)
             }
         }
         _ = working.ingestCalendarEvents(calendarEvents, recorderName: myName, now: now)
+        _ = working.consolidateDuplicates(now: now)
 
         let allCommitments = CommitmentsRadar.build(from: snapshots, recorderName: myName, now: now)
 
@@ -472,9 +615,11 @@ public enum PeopleDirectory {
 
             for snap in snapshots where snap.meta.status != .recording {
                 let matchingSpeakerIDs = snap.speakers.names.compactMap { id, name in
-                    profile.matchesName(name) ? id : nil
+                    (id != SpeakerNames.youID && profile.matchesName(name)) ? id : nil
                 }
-                let onRecordedInvite = snap.meta.calendarAttendees.contains { profile.matchesAttendee($0) }
+                let onRecordedInvite = snap.meta.calendarAttendees.contains {
+                    $0.status != .declined && profile.matchesAttendee($0)
+                }
                 let mentionedAsOwner = snap.summary?.actionItems.contains { item in
                     guard let owner = item.owner else { return false }
                     return profile.matchesName(owner)
@@ -576,15 +721,22 @@ public enum CalendarSpeakerHints {
     /// Calendar invitees not yet assigned to any speaker in `existing`, so the user can assign a voice in 1 click.
     public static func unassignedInvitees(attendees: [CalendarAttendee],
                                           existing: SpeakerNames,
-                                          recorderName: String = "") -> [String] {
+                                          recorderName: String = "",
+                                          store: PeopleStore? = nil) -> [String] {
         let myName = recorderName.trimmingCharacters(in: .whitespacesAndNewlines)
         let assigned = existing.names.values.filter { !SpeakerMemory.isPlaceholder($0) }
         var out: [String] = []
         for att in attendees where att.status != .declined {
-            let candidate = att.name.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !candidate.isEmpty, !SpeakerMemory.isPlaceholder(candidate) else { continue }
+            let raw = att.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !raw.isEmpty, !SpeakerMemory.isPlaceholder(raw) else { continue }
+            let resolved = store?.find(named: raw, email: att.email)?.name
+                ?? PersonName.parse(raw).canonicalDisplayName
+            let candidate = resolved.isEmpty ? raw : resolved
+            guard !SpeakerMemory.isPlaceholder(candidate) else { continue }
             if !myName.isEmpty, SpeakerMemory.namesMatch(candidate, myName) { continue }
-            if assigned.contains(where: { SpeakerMemory.namesMatch($0, candidate) }) { continue }
+            if assigned.contains(where: { SpeakerMemory.namesMatch($0, candidate) || SpeakerMemory.namesPrefixMatch($0, candidate) }) {
+                continue
+            }
             if !out.contains(where: { SpeakerMemory.namesMatch($0, candidate) }) {
                 out.append(candidate)
             }
