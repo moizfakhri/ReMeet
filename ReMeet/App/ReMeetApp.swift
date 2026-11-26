@@ -21,6 +21,9 @@ struct ReMeetApp: App {
             MeetingWindowRoot()
                 .environment(model)
                 .tint(Theme.accentFill)
+                .onOpenURL { url in
+                    model.handleDeepLink(url)
+                }
         }
         .defaultLaunchBehavior(.suppressed)
         .defaultSize(width: 1040, height: 680)
@@ -110,6 +113,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             AppModel.shared.openMeetings()
         }
         return true
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        MainActor.assumeIsolated {
+            for url in urls {
+                AppModel.shared.handleDeepLink(url)
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

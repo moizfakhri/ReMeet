@@ -195,6 +195,7 @@ struct PersonDetailView: View {
         ResponsiveDocumentScroll(maxWidth: 660, topPadding: 24, bottomPadding: 48) { _ in
             VStack(alignment: .leading, spacing: 22) {
                 heroHeader
+                possibleDuplicatesBanner
                 if let next = person.nextMeeting {
                     upcomingBanner(next)
                 }
@@ -250,6 +251,15 @@ struct PersonDetailView: View {
                         .textSelection(.enabled)
                 }
 
+                let readableAliases = person.profile.aliases.filter {
+                    PersonName.isReadableAlias($0, for: person.profile.name)
+                }
+                if !readableAliases.isEmpty {
+                    Text("Also known as: \(readableAliases.joined(separator: ", "))")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.fg3)
+                }
+
                 HStack(spacing: 8) {
                     if person.hasVoiceprint {
                         Label("Voiceprint · \(TimeFormat.duration(person.voiceSampleSeconds))",
@@ -302,6 +312,39 @@ struct PersonDetailView: View {
                 .menuIndicator(.hidden)
                 .fixedSize()
             }
+        }
+    }
+
+    @ViewBuilder private var possibleDuplicatesBanner: some View {
+        let candidates = model.hub.possibleDuplicates(for: person)
+        if !candidates.isEmpty {
+            HStack(spacing: 10) {
+                Image(systemName: "person.2.badge.gearshape")
+                    .font(.system(size: 15))
+                    .foregroundStyle(Theme.accent)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Possible duplicate profile\(candidates.count == 1 ? "" : "s")")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(Theme.fg)
+                    Text("Same first or last name as \(candidates.map(\.profile.name).joined(separator: ", ")).")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.fg2)
+                }
+                Spacer()
+                ForEach(candidates.prefix(2)) { dup in
+                    Button("Merge with \(dup.profile.name)") {
+                        let targetID = dup.profile.name.count >= person.profile.name.count ? dup.id : person.id
+                        let sourceID = targetID == dup.id ? person.id : dup.id
+                        model.hub.mergePeople(sourceID: sourceID, into: targetID, recorderName: AppModel.recorderName)
+                        model.selectedPersonID = targetID
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+            .padding(11)
+            .background(Theme.mark.opacity(0.45), in: RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(Theme.accent.opacity(0.25)))
         }
     }
 
@@ -427,11 +470,16 @@ struct PersonDetailView: View {
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(Theme.fg2)
                     ForEach(person.theirOpenCommitments) { item in
-                        CommitmentRowView(item: item, showOwner: false) { done in
-                            model.toggleCommitment(item, done: done)
-                        } onOpenMeeting: {
-                            onOpenMeeting(item.meetingFolder, item.actionItem.t)
-                        }
+                        CommitmentRowView(
+                            item: item,
+                            showOwner: false,
+                            availableReminderLists: model.reminders.availableLists,
+                            remindersConnected: RemindersSyncService.hasAccess,
+                            onToggle: { done in model.toggleCommitment(item, done: done) },
+                            onOpenMeeting: { onOpenMeeting(item.meetingFolder, item.actionItem.t) },
+                            onSendToReminders: { listID in model.sendActionItemToReminders(item.actionItem, in: item.meetingFolder, listID: listID) },
+                            onUnlinkReminder: { deleteInReminders in model.unlinkActionItemFromReminders(item.actionItem, in: item.meetingFolder, deleteInReminders: deleteInReminders) }
+                        )
                     }
                 }
 
@@ -441,11 +489,16 @@ struct PersonDetailView: View {
                         .foregroundStyle(Theme.fg2)
                         .padding(.top, person.theirOpenCommitments.isEmpty ? 0 : 4)
                     ForEach(person.yourOpenCommitments) { item in
-                        CommitmentRowView(item: item, showOwner: false) { done in
-                            model.toggleCommitment(item, done: done)
-                        } onOpenMeeting: {
-                            onOpenMeeting(item.meetingFolder, item.actionItem.t)
-                        }
+                        CommitmentRowView(
+                            item: item,
+                            showOwner: false,
+                            availableReminderLists: model.reminders.availableLists,
+                            remindersConnected: RemindersSyncService.hasAccess,
+                            onToggle: { done in model.toggleCommitment(item, done: done) },
+                            onOpenMeeting: { onOpenMeeting(item.meetingFolder, item.actionItem.t) },
+                            onSendToReminders: { listID in model.sendActionItemToReminders(item.actionItem, in: item.meetingFolder, listID: listID) },
+                            onUnlinkReminder: { deleteInReminders in model.unlinkActionItemFromReminders(item.actionItem, in: item.meetingFolder, deleteInReminders: deleteInReminders) }
+                        )
                     }
                 }
             }

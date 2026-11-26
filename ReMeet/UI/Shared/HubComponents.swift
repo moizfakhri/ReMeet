@@ -182,9 +182,13 @@ struct CommitmentRowView: View {
     let item: CommitmentItem
     var showOwner = true
     var showMeeting = true
+    var availableReminderLists: [ReminderListInfo] = []
+    var remindersConnected = false
     let onToggle: (Bool) -> Void
     let onOpenMeeting: () -> Void
     var onDismiss: (() -> Void)? = nil
+    var onSendToReminders: ((String?) -> Void)? = nil
+    var onUnlinkReminder: ((Bool) -> Void)? = nil
     @State private var hovering = false
 
     var body: some View {
@@ -234,7 +238,12 @@ struct CommitmentRowView: View {
                     }
                 }
             }
-            Spacer(minLength: 0)
+            Spacer(minLength: 4)
+
+            if let onSendToReminders {
+                remindersControl(onSend: onSendToReminders)
+            }
+
             if let onDismiss, hovering {
                 Button(action: onDismiss) {
                     Image(systemName: "xmark")
@@ -252,6 +261,87 @@ struct CommitmentRowView: View {
         .background(Theme.bg.opacity(0.65), in: RoundedRectangle(cornerRadius: 9))
         .overlay(RoundedRectangle(cornerRadius: 9).stroke(Theme.line))
         .onHover { hovering = $0 }
+    }
+
+    @ViewBuilder
+    private func remindersControl(onSend: @escaping (String?) -> Void) -> some View {
+        if let rid = item.actionItem.reminderID, !rid.isEmpty {
+            let listLabel = item.actionItem.reminderListName ?? "Reminders"
+            Menu {
+                if !availableReminderLists.isEmpty {
+                    Section("Move to list") {
+                        ForEach(availableReminderLists) { list in
+                            Button {
+                                onSend(list.id)
+                            } label: {
+                                if list.id == item.actionItem.reminderListID {
+                                    Label(list.title, systemImage: "checkmark")
+                                } else {
+                                    Text(list.title)
+                                }
+                            }
+                        }
+                    }
+                }
+                Divider()
+                Button("Open Apple Reminders") {
+                    if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.reminders") {
+                        NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration())
+                    }
+                }
+                if let onUnlinkReminder {
+                    Button("Unlink from ReMeet") { onUnlinkReminder(false) }
+                    Button("Delete from Apple Reminders", role: .destructive) { onUnlinkReminder(true) }
+                }
+            } label: {
+                HStack(spacing: 3.5) {
+                    Image(systemName: "checklist")
+                        .font(.system(size: 9.5, weight: .semibold))
+                    Text(listLabel)
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .lineLimit(1)
+                }
+                .foregroundStyle(Theme.accent)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2.5)
+                .background(Theme.mark, in: Capsule())
+                .overlay(Capsule().stroke(Theme.accent.opacity(0.25)))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("Synced to Apple Reminders list \u{201C}\(listLabel)\u{201D} — click to move or manage")
+        } else if hovering || !remindersConnected {
+            Menu {
+                Button("Send to default list") { onSend(nil) }
+                if !availableReminderLists.isEmpty {
+                    Divider()
+                    Section("Choose list") {
+                        ForEach(availableReminderLists) { list in
+                            Button(list.title) { onSend(list.id) }
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "checklist")
+                        .font(.system(size: 10, weight: .medium))
+                    Text("Remind")
+                        .font(.system(size: 10.5, weight: .medium))
+                }
+                .foregroundStyle(Theme.fg2)
+                .padding(.horizontal, 6.5)
+                .padding(.vertical, 2)
+                .background(Theme.surface, in: Capsule())
+                .overlay(Capsule().stroke(Theme.line))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .opacity(hovering ? 1 : 0)
+            .allowsHitTesting(hovering)
+            .help("Send this action item to Apple Reminders")
+        }
     }
 }
 

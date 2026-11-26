@@ -69,7 +69,8 @@ final class HubCoordinator {
                 let orderedSnaps = snaps.values.sorted { $0.meta.startTime > $1.meta.startTime }
                 var store = PeopleFile.load(peopleURL)
                 let seeded = store.ingestCalendarEvents(calendarEvents, recorderName: recorderName)
-                if seeded { try? PeopleFile.save(store, to: peopleURL) }
+                let consolidated = store.consolidateDuplicates()
+                if seeded || consolidated { try? PeopleFile.save(store, to: peopleURL) }
                 let memory = SpeakerMemoryFile.load(voiceURL)
                 let peopleList = PeopleDirectory.build(
                     store: store,
@@ -256,6 +257,13 @@ final class HubCoordinator {
             await recomputeDerived(snapshotsMap: snapshotsByID, calendarEvents: calendarEvents,
                                    peopleURL: peopleFileURL, voiceURL: voiceprintsURL, recorderName: recorderName)
         }
+    }
+
+    func possibleDuplicates(for person: PersonSummary) -> [PersonSummary] {
+        let store = PeopleStore(profiles: people.map(\.profile))
+        let matches = store.possibleDuplicates(for: person.id)
+        let matchIDs = Set(matches.map(\.id))
+        return people.filter { matchIDs.contains($0.id) }
     }
 
     func forgetVoiceprint(for person: PersonSummary, recorderName: String) {

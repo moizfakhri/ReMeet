@@ -53,6 +53,31 @@ struct MeetingSidebar: View {
                 )
             }
 
+            if let notice = model.remindersNotice {
+                HStack(spacing: 6) {
+                    Image(systemName: "checklist")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.accent)
+                    Text(notice)
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(Theme.fg)
+                        .lineLimit(2)
+                    Spacer(minLength: 4)
+                    Button {
+                        model.remindersNotice = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9.5, weight: .bold))
+                            .foregroundStyle(Theme.fg3)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Theme.mark.opacity(0.65))
+                Theme.line.frame(height: 1)
+            }
+
             Theme.line.frame(height: 1)
             HStack(spacing: 12) {
                 Button {
@@ -131,11 +156,25 @@ struct MeetingSidebar: View {
             }
         }
         .sheet(item: $folderEditor) { editor in
-            FolderEditorSheet(editor: editor) { name, context, exportPath in
+            FolderEditorSheet(editor: editor) { name, context, exportPath, remListID, remListName, remDisabled in
                 if let id = editor.collection?.id {
-                    model.library.updateCollection(id, name: name, context: context, exportDirectoryPath: .some(exportPath))
-                } else if let created = model.library.createCollection(named: name, context: context,
-                                                                       exportDirectoryPath: exportPath) {
+                    model.library.updateCollection(
+                        id,
+                        name: name,
+                        context: context,
+                        exportDirectoryPath: .some(exportPath),
+                        remindersListID: .some(remListID),
+                        remindersListName: .some(remListName),
+                        remindersDisabled: remDisabled
+                    )
+                } else if let created = model.library.createCollection(
+                    named: name,
+                    context: context,
+                    exportDirectoryPath: exportPath,
+                    remindersListID: remListID,
+                    remindersListName: remListName,
+                    remindersDisabled: remDisabled
+                ) {
                     if let meeting = editor.moving { model.library.move(meeting, to: created.id) }
                     setExpanded(created.id, true)
                 }
@@ -550,6 +589,10 @@ struct MeetingSidebar: View {
         .accessibilityValue(open ? "Expanded" : "Collapsed")
         .contextMenu {
             Button("Edit Folder & AI Export…") { folderEditor = FolderEditor(collection: folder) }
+            Button("Sync Folder Action Items to Reminders") {
+                Task { _ = await model.syncCollectionReminders(folder) }
+            }
+            .disabled(folder.remindersDisabled)
             if let exportPath = folder.exportDirectoryPath {
                 Button("Export All Meetings Now") {
                     model.syncCollectionExports(folder)
@@ -730,12 +773,20 @@ struct FolderEditor: Identifiable {
 }
 
 private struct FolderEditorSheet: View {
+    private static let defaultChoice = "__default__"
+    private static let offChoice = "__off__"
+
+    @Environment(AppModel.self) private var model
+    @AppStorage(SettingsKey.remindersMirrorFolders) private var mirrorFolders = true
     let editor: FolderEditor
-    let save: (String, String, String?) -> Void
+    let save: (String, String, String?, String?, String?, Bool) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var context = ""
     @State private var exportDirectoryPath = ""
+    @State private var remindersChoice = FolderEditorSheet.defaultChoice
+    @State private var folderSyncStatus: String?
+    @State private var isSyncingFolder = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -776,13 +827,62 @@ private struct FolderEditorSheet: View {
                 Text("Finished meetings in this folder automatically save a Markdown file here (summary, action items, notes, and full transcript) so Claude or other AI agents can read them directly.")
                     .font(.caption).foregroundStyle(Theme.fg2)
             }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Apple Reminders List").font(.subheadline.weight(.semibold))
+                HStack(spacing: 8) {
+                    Picker("Apple Reminders List", selection: $remindersChoice) {
+                        Text(mirrorFolders ? "Auto-match folder list" : "Use default list").tag(Self.defaultChoice)
+                        ForEach(model.reminders.availableLists) { list in
+                            Text(list.title).tag(list.id)
+                        }
+                        Text("Don't auto-sync").tag(Self.offChoice)
+                    }
+                    .labelsHidden()
+
+                    if let existing = editor.collection {
+                        Button(isSyncingFolder ? "Syncing…" : "Sync Folder Now") {
+                            isSyncingFolder = true
+                            let disabled = (remindersChoice == Self.offChoice)
+                            let chosenListID: String? = (remindersChoice == Self.defaultChoice || disabled) ? nil : remindersChoice
+                            let chosenListName: String? = chosenListID.flatMap { id in
+                                model.reminders.list(forID: id)?.title ?? existing.remindersListName
+                            }
+                            model.library.updateCollection(
+                                existing.id,
+                                remindersListID: .some(chosenListID),
+                                remindersListName: .some(chosenListName),
+                                remindersDisabled: disabled
+                            )
+                            let updated = model.library.collection(existing.id) ?? existing
+                            Task {
+                                let count = await model.syncCollectionReminders(updated)
+                                isSyncingFolder = false
+                                folderSyncStatus = model.reminders.lastError ?? "Synced \(count) open item\(count == 1 ? "" : "s")."
+                            }
+                        }
+                        .disabled(isSyncingFolder || remindersChoice == Self.offChoice)
+                    }
+                }
+                if let folderSyncStatus {
+                    Text(folderSyncStatus)
+                        .font(.caption)
+                        .foregroundStyle(Theme.accent)
+                }
+                Text("Route action items from meetings in this folder to a matching Apple Reminders list (which you can place under a Work group in Reminders).")
+                    .font(.caption).foregroundStyle(Theme.fg2)
+            }
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button(editor.collection == nil ? "Create" : "Save") {
                     let trimmed = exportDirectoryPath.trimmingCharacters(in: .whitespacesAndNewlines)
-                    save(name, context, trimmed.isEmpty ? nil : trimmed)
+                    let disabled = (remindersChoice == Self.offChoice)
+                    let chosenListID: String? = (remindersChoice == Self.defaultChoice || disabled) ? nil : remindersChoice
+                    let chosenListName: String? = chosenListID.flatMap { id in
+                        model.reminders.list(forID: id)?.title ?? editor.collection?.remindersListName
+                    }
+                    save(name, context, trimmed.isEmpty ? nil : trimmed, chosenListID, chosenListName, disabled)
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -797,6 +897,13 @@ private struct FolderEditorSheet: View {
             name = editor.collection?.name ?? ""
             context = editor.collection?.context ?? ""
             exportDirectoryPath = editor.collection?.exportDirectoryPath ?? ""
+            if editor.collection?.remindersDisabled == true {
+                remindersChoice = Self.offChoice
+            } else if let lid = editor.collection?.remindersListID, !lid.isEmpty {
+                remindersChoice = lid
+            } else {
+                remindersChoice = Self.defaultChoice
+            }
         }
     }
 

@@ -875,18 +875,26 @@ private struct SpeakerAssignSheet: View {
 
     private var invitees: [String] {
         let q = nameInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        return document.meta.calendarAttendees
-            .filter { $0.status != .declined }
-            .map(\.name)
-            .filter { !SpeakerMemory.isPlaceholder($0) && $0.caseInsensitiveCompare(AppModel.recorderName) != .orderedSame }
-            .filter { q.isEmpty || $0.localizedCaseInsensitiveContains(q) }
+        let store = PeopleStore(profiles: model.hub.people.map(\.profile))
+        var seen: [String] = []
+        for att in document.meta.calendarAttendees where att.status != .declined {
+            let raw = att.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !SpeakerMemory.isPlaceholder(raw) else { continue }
+            let resolved = store.find(named: raw, email: att.email)?.name
+                ?? PersonName.parse(raw).canonicalDisplayName
+            guard !SpeakerMemory.isPlaceholder(resolved),
+                  !SpeakerMemory.namesMatch(resolved, AppModel.recorderName) else { continue }
+            if !seen.contains(where: { SpeakerMemory.namesMatch($0, resolved) }) {
+                seen.append(resolved)
+            }
+        }
+        return seen.filter { q.isEmpty || $0.localizedCaseInsensitiveContains(q) }
     }
 
     private var filteredPeople: [PersonSummary] {
         let q = nameInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        let inviteSet = Set(invitees.map { $0.lowercased() })
         return model.hub.people.filter { p in
-            !inviteSet.contains(p.profile.name.lowercased())
+            !invitees.contains(where: { SpeakerMemory.namesMatch($0, p.profile.name) })
                 && (q.isEmpty || p.profile.name.localizedCaseInsensitiveContains(q))
         }
     }

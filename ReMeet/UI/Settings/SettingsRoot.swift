@@ -13,6 +13,7 @@ struct SettingsRoot: View {
         case general = "General"
         case recording = "Recording"
         case calendar = "Calendar"
+        case reminders = "Reminders"
         case transcription = "Transcription"
         case summaries = "Summaries"
         case permissions = "Permissions"
@@ -23,6 +24,7 @@ struct SettingsRoot: View {
             case .general: "gearshape"
             case .recording: "record.circle"
             case .calendar: "calendar"
+            case .reminders: "checklist"
             case .transcription: "text.quote"
             case .summaries: "sparkles.rectangle.stack"
             case .permissions: "lock.shield"
@@ -63,6 +65,7 @@ struct SettingsRoot: View {
                 case .general: GeneralPane()
                 case .recording: RecordingPane()
                 case .calendar: CalendarPane()
+                case .reminders: RemindersPane()
                 case .transcription: TranscriptionPane()
                 case .summaries: SummariesPane()
                 case .permissions: PermissionsPane()
@@ -359,6 +362,205 @@ private struct CalendarPane: View {
     }
 }
 
+// MARK: - Reminders
+
+private struct RemindersPane: View {
+    private static let systemDefaultChoice = "__system__"
+    private static let folderDefaultChoice = "__default__"
+    private static let folderOffChoice = "__off__"
+
+    @Environment(AppModel.self) private var model
+    @AppStorage(SettingsKey.remindersAutoSync) private var autoSync = true
+    @AppStorage(SettingsKey.remindersIncludeWaitingOnOthers) private var includeWaiting = false
+    @AppStorage(SettingsKey.remindersMirrorFolders) private var mirrorFolders = true
+    @AppStorage(SettingsKey.defaultRemindersListID) private var defaultListID = ""
+    @AppStorage(SettingsKey.defaultRemindersListName) private var defaultListName = ""
+    @State private var accessGranted = RemindersSyncService.hasAccess
+    @State private var accessDenied = RemindersSyncService.accessDenied
+    @State private var syncStatus: String?
+    @State private var isSyncingNow = false
+
+    private var hasWorkList: Bool {
+        model.reminders.listNamed("Work") != nil
+    }
+
+    var body: some View {
+        Form {
+            Section("Apple Reminders") {
+                LabeledContent("Reminders access") {
+                    if accessGranted {
+                        Label("Connected", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(Theme.accent)
+                            .font(.callout.weight(.medium))
+                    } else if accessDenied {
+                        Button("Open Privacy Settings") {
+                            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Reminders")!)
+                        }
+                    } else {
+                        Button("Connect Apple Reminders") {
+                            Task {
+                                let ok = await model.reminders.requestAccess()
+                                accessGranted = ok
+                                accessDenied = RemindersSyncService.accessDenied
+                                if ok { model.reminders.start() }
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.accentFill)
+                    }
+                }
+
+                if !accessGranted {
+                    Text("Click \u{201C}Connect Apple Reminders\u{201D} to trigger the macOS permission prompt. macOS only lists ReMeet in System Settings \u{2192} Privacy & Security \u{2192} Reminders after you request access here once.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.fg2)
+                }
+
+                if let err = model.reminders.lastError {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+
+                if accessGranted {
+                    Picker("Default Reminders list", selection: Binding(
+                        get: { defaultListID.isEmpty ? Self.systemDefaultChoice : defaultListID },
+                        set: { next in
+                            if next == Self.systemDefaultChoice {
+                                defaultListID = ""
+                                defaultListName = ""
+                            } else {
+                                defaultListID = next
+                                defaultListName = model.reminders.list(forID: next)?.title ?? ""
+                            }
+                        }
+                    )) {
+                        Text("System default").tag(Self.systemDefaultChoice)
+                        ForEach(model.reminders.availableLists) { list in
+                            Text(list.accountTitle.isEmpty ? list.title : "\(list.title) (\(list.accountTitle))").tag(list.id)
+                        }
+                    }
+
+                    if !hasWorkList {
+                        Button("Create \u{201C}Work\u{201D} List & Set as Default") {
+                            if let created = model.reminders.createList(named: "Work") {
+                                defaultListID = created.id
+                                defaultListName = created.title
+                            }
+                        }
+                    }
+                }
+
+                Toggle("Automatically sync new \u{201C}For you\u{201D} action items", isOn: $autoSync)
+                Toggle("Also add \u{201C}Waiting on others\u{201D} as follow-up reminders", isOn: $includeWaiting)
+                Text("Synced items include due dates and a deep link back to the exact moment in the meeting. Checking off a reminder on your Mac, iPhone, or Apple Watch updates ReMeet automatically.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.fg2)
+            }
+
+            if accessGranted && !model.library.collections.isEmpty {
+                Section("Folder Routing") {
+                    Toggle("Mirror ReMeet folders as Apple Reminders lists", isOn: $mirrorFolders)
+                    ForEach(model.library.collections) { folder in
+                        HStack(spacing: 8) {
+                            Picker(folder.name, selection: Binding(
+                                get: {
+                                    if folder.remindersDisabled { return Self.folderOffChoice }
+                                    if let lid = folder.remindersListID, !lid.isEmpty { return lid }
+                                    return Self.folderDefaultChoice
+                                },
+                                set: { next in
+                                    if next == Self.folderOffChoice {
+                                        model.library.updateCollection(folder.id, remindersListID: .some(nil), remindersListName: .some(nil), remindersDisabled: true)
+                                    } else if next == Self.folderDefaultChoice {
+                                        model.library.updateCollection(folder.id, remindersListID: .some(nil), remindersListName: .some(nil), remindersDisabled: false)
+                                    } else {
+                                        let name = model.reminders.list(forID: next)?.title
+                                        model.library.updateCollection(folder.id, remindersListID: .some(next), remindersListName: .some(name), remindersDisabled: false)
+                                    }
+                                }
+                            )) {
+                                Text(mirrorFolders
+                                     ? "Auto (\u{201C}\(folder.name)\u{201D})"
+                                     : "Default (\(defaultListName.isEmpty ? "Reminders" : defaultListName))")
+                                    .tag(Self.folderDefaultChoice)
+                                ForEach(model.reminders.availableLists) { list in
+                                    Text(list.title).tag(list.id)
+                                }
+                                Text("Don't auto-sync").tag(Self.folderOffChoice)
+                            }
+                            Button("Sync") {
+                                isSyncingNow = true
+                                Task {
+                                    let count = await model.syncCollectionReminders(folder)
+                                    isSyncingNow = false
+                                    syncStatus = "Synced \(count) open item\(count == 1 ? "" : "s") from \u{201C}\(folder.name)\u{201D}."
+                                }
+                            }
+                            .controlSize(.small)
+                            .disabled(isSyncingNow || folder.remindersDisabled)
+                        }
+                    }
+                    Button("Create & Link Folder Lists Now") {
+                        let lists = model.syncFolderReminderLists()
+                        syncStatus = "Linked \(lists.count) folder list\(lists.count == 1 ? "" : "s") in Apple Reminders."
+                    }
+                    Text("Each ReMeet folder automatically creates/links its own matching list. In Apple Reminders' sidebar, you can drag those lists into a \u{201C}Work\u{201D} group once \u{2014} ReMeet tracks each list by ID and keeps syncing into your group.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.fg2)
+                }
+            }
+
+            if accessGranted {
+                Section("Sync") {
+                    HStack(spacing: 10) {
+                        Button(isSyncingNow ? "Syncing…" : "Sync Open Items Now") {
+                            isSyncingNow = true
+                            Task {
+                                let count = await model.syncOpenCommitmentsToReminders()
+                                model.pullRemindersChanges()
+                                isSyncingNow = false
+                                syncStatus = count == 0
+                                    ? "Up to date."
+                                    : "Synced \(count) open action item\(count == 1 ? "" : "s")."
+                            }
+                        }
+                        .disabled(isSyncingNow)
+
+                        Button("Open Reminders") {
+                            model.reminders.openRemindersApp()
+                        }
+                    }
+                    if let syncStatus {
+                        Text(syncStatus)
+                            .font(.caption)
+                            .foregroundStyle(Theme.accent)
+                    }
+                    if let err = model.reminders.lastError {
+                        Text(err)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+            }
+        }
+        .onAppear {
+            accessGranted = RemindersSyncService.hasAccess
+            accessDenied = RemindersSyncService.accessDenied
+            if accessGranted {
+                model.reminders.refreshLists()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            accessGranted = RemindersSyncService.hasAccess
+            accessDenied = RemindersSyncService.accessDenied
+            if accessGranted {
+                model.reminders.start()
+            }
+        }
+    }
+}
+
 // MARK: - Transcription
 
 private struct TranscriptionPane: View {
@@ -487,6 +689,9 @@ private struct PermissionsPane: View {
     @State private var probe = LevelProbe()
     @State private var micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
     @State private var notifications: UNAuthorizationStatus = .notDetermined
+    @State private var remindersGranted = RemindersSyncService.hasAccess
+    @State private var remindersDenied = RemindersSyncService.accessDenied
+    @State private var remindersNotDetermined = RemindersSyncService.notDetermined
 
     var body: some View {
         Form {
@@ -512,6 +717,23 @@ private struct PermissionsPane: View {
                         }
                     }
                 }
+                LabeledContent("Apple Reminders") {
+                    HStack {
+                        Text(remindersGranted ? "Allowed" : (remindersDenied ? "Off" : "Not asked yet"))
+                            .foregroundStyle(Theme.fg2)
+                        if remindersNotDetermined {
+                            Button("Request Access") {
+                                Task {
+                                    _ = await model.reminders.requestAccess()
+                                    refreshPermissionStates()
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(Theme.accentFill)
+                        }
+                        Button("Open System Settings") { open("Privacy_Reminders") }
+                    }
+                }
             }
             Section("Pre-Meeting Sound Check") {
                 SoundCheckCard(probe: probe, compact: false)
@@ -519,16 +741,26 @@ private struct PermissionsPane: View {
             DiagnosticsSection()
         }
         .onAppear {
-            micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-            UNUserNotificationCenter.current().getNotificationSettings { settings in
-                let status = settings.authorizationStatus
-                DispatchQueue.main.async { notifications = status }
-            }
+            refreshPermissionStates()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshPermissionStates()
         }
         .onChange(of: model.recorder.isRecording) { _, recording in
             if recording { probe.stop() }
         }
         .onDisappear { probe.stop() }
+    }
+
+    private func refreshPermissionStates() {
+        micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        remindersGranted = RemindersSyncService.hasAccess
+        remindersDenied = RemindersSyncService.accessDenied
+        remindersNotDetermined = RemindersSyncService.notDetermined
+        UNUserNotificationCenter.current().getNotificationSettings { settings in
+            let status = settings.authorizationStatus
+            DispatchQueue.main.async { notifications = status }
+        }
     }
 
     private var micText: String {

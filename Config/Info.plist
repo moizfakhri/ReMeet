@@ -6,7 +6,22 @@
 	<string>ReMeet records your microphone during meetings so your side of the conversation can be transcribed on this Mac.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>
 	<string>ReMeet reads your calendar on this Mac to remind you to record a minute before a meeting and to name the recording after it. Nothing is changed or sent anywhere.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>ReMeet syncs your meeting action items with your Apple Reminders lists (such as Work or Projects) and keeps completion status in sync on this Mac.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>ReMeet syncs your meeting action items with your Apple Reminders lists (such as Work or Projects) and keeps completion status in sync on this Mac.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>ReMeet records call audio playing on this Mac so the other participants can be transcribed on this Mac.</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.moizfakhri.ReMeet</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>remeet</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

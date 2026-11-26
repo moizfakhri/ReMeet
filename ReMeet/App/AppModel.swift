@@ -56,6 +56,11 @@ enum SettingsKey {
     static let customInstructions = "customInstructions"
     static let notifyWhenReady = "notifyWhenReady"
     static let chatAnswerBackend = "chatAnswerBackend"
+    static let remindersAutoSync = "remindersAutoSync"
+    static let defaultRemindersListID = "defaultRemindersListID"
+    static let defaultRemindersListName = "defaultRemindersListName"
+    static let remindersIncludeWaitingOnOthers = "remindersIncludeWaitingOnOthers"
+    static let remindersMirrorFolders = "remindersMirrorFolders"
 }
 
 /// Root object: wires the recorder, the library and (later phases) the pipeline together.
@@ -69,6 +74,7 @@ final class AppModel {
     let queue = ProcessingQueue()
     let models = ModelManager()
     let hub = HubCoordinator()
+    let reminders = RemindersSyncService()
     @ObservationIgnored private(set) lazy var notifier = Notifier()
     @ObservationIgnored private let processMonitor = AudioProcessMonitor()
     @ObservationIgnored private var detector = MeetingDetector()
@@ -114,6 +120,11 @@ final class AppModel {
     var requestedSettingsPane: SettingsRoot.Pane?
     var selectedPersonID: String?
     var selectedCalendarEventID: String?
+    private(set) var documentRevisions: [String: Int] = [:]
+    var remindersNotice: String?
+    @ObservationIgnored private var activeObserver: NSObjectProtocol?
+    @ObservationIgnored private var lastPullAt: Date = .distantPast
+    @ObservationIgnored private var noticeTask: Task<Void, Never>?
 
     @ObservationIgnored private var openWindowAction: OpenWindowAction?
     @ObservationIgnored private var openSettingsAction: OpenSettingsAction?
@@ -142,6 +153,9 @@ final class AppModel {
             SettingsKey.summaryBackend: SummaryBackendKind.builtIn.rawValue,
             SettingsKey.transcriptionEngine: TranscriptionEngine.default.rawValue,
             SettingsKey.chatAnswerBackend: MeetingChatAnswerBackend.default.rawValue,
+            SettingsKey.remindersAutoSync: true,
+            SettingsKey.remindersIncludeWaitingOnOthers: false,
+            SettingsKey.remindersMirrorFolders: true,
         ])
         library = MeetingLibrary(root: MeetingFolder.defaultRoot)
         library.root = meetingsRoot
@@ -201,6 +215,9 @@ final class AppModel {
         library.onCollectionExportChanged = { [weak self] collection in
             self?.syncCollectionExports(collection)
         }
+        library.onMeetingMoved = { [weak self] folder, _ in
+            self?.meetingFolderChangedForReminders(folder)
+        }
         library.onTrashed = { [weak self] folder in self?.meetingTrashed(folder) }
         queue.onChange = { [weak self] folder in
             self?.library.refresh(folder)
@@ -222,6 +239,25 @@ final class AppModel {
             self.exportMarkdown(for: folder)
             self.hub.refreshMeeting(folder, recorderName: Self.recorderName)
             self.notifier.summaryReady(folder, meta: meta)
+            self.autoSyncRemindersIfNeeded(for: folder)
+        }
+        reminders.onExternalChange = { [weak self] in
+            self?.pullRemindersChanges()
+        }
+        activeObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if RemindersSyncService.hasAccess, Date().timeIntervalSince(self.lastPullAt) >= 2.0 {
+                    self.pullRemindersChanges()
+                }
+            }
+        }
+        if RemindersSyncService.hasAccess {
+            reminders.start()
         }
         queue.onFailed = { [weak self] folder, failure in self?.notifier.failed(folder, failure: failure) }
         queue.onTranscribed = { [weak self] folder, meta in self?.notifier.transcriptReady(folder, meta: meta) }
@@ -234,6 +270,12 @@ final class AppModel {
             Perf.mark("library.loaded")
             self.queue.enqueuePending(in: self.library)
             self.hub.reloadAll(items: self.library.items, calendarEvents: self.calendar.events, recorderName: Self.recorderName)
+            if RemindersSyncService.hasAccess {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(1))
+                    self.pullRemindersChanges()
+                }
+            }
         }
         syncSearchIndex()
         cleanOldAudio()
@@ -1199,9 +1241,9 @@ final class AppModel {
         openMeetings()
     }
 
-    /// Toggles an action item from the Schedule, People, or Commitments view, updating `summary.json` & exports.
+    /// Toggles an action item from the Schedule, People, or Commitments view, updating `summary.json`, Apple Reminders & exports.
     func toggleCommitment(_ item: CommitmentItem, done: Bool) {
-        mutateCommitment(item) { $0.done = done }
+        mutateCommitment(item, syncDoneToReminders: done) { $0.done = done }
     }
 
     /// Hides an irrelevant action item from Commitments & its meeting summary.
@@ -1214,23 +1256,622 @@ final class AppModel {
         mutateCommitment(item) { $0.relatesToMe = relatesToMe }
     }
 
-    private func mutateCommitment(_ item: CommitmentItem, mutation: @Sendable @escaping (inout ActionItem) -> Void) {
+    func bumpDocumentRevision(_ folder: MeetingFolder) {
+        documentRevisions[folder.id, default: 0] += 1
+    }
+
+    func showRemindersNotice(_ message: String) {
+        noticeTask?.cancel()
+        remindersNotice = message
+        noticeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            guard !Task.isCancelled else { return }
+            self?.remindersNotice = nil
+        }
+    }
+
+    private func mutateCommitment(_ item: CommitmentItem,
+                                  syncDoneToReminders: Bool? = nil,
+                                  mutation: @Sendable @escaping (inout ActionItem) -> Void) {
         let folder = item.meetingFolder
-        let target = item.actionItem
+        let targetID = item.actionItem.id
+        let fallbackReminderID = item.actionItem.reminderID
         Task {
-            let changed = await Task.detached(priority: .userInitiated) { () -> Bool in
+            let result = await Task.detached(priority: .userInitiated) { () -> (changed: Bool, reminderID: String?) in
                 guard var summary = (try? folder.read(MeetingSummary.self, .summary)) ?? nil,
-                      let index = summary.actionItems.firstIndex(of: target) else { return false }
+                      let index = summary.actionItems.firstIndex(where: { $0.id == targetID }) else {
+                    return (false, fallbackReminderID)
+                }
                 mutation(&summary.actionItems[index])
                 try? folder.write(summary, .summary)
                 folder.rewriteMarkdown()
-                return true
+                return (true, summary.actionItems[index].reminderID)
             }.value
-            guard changed else { return }
+            if let syncDoneToReminders, let rid = result.reminderID ?? fallbackReminderID {
+                await reminders.syncCompletion(reminderID: rid, done: syncDoneToReminders)
+            }
+            guard result.changed else { return }
             self.library.refresh(folder)
+            self.bumpDocumentRevision(folder)
             self.exportMarkdown(for: folder)
             self.hub.refreshMeeting(folder, recorderName: Self.recorderName)
         }
+    }
+
+    // MARK: - Apple Reminders Integration & Deep Links
+
+    var defaultRemindersListID: String? {
+        get { UserDefaults.standard.string(forKey: SettingsKey.defaultRemindersListID) }
+        set { UserDefaults.standard.set(newValue, forKey: SettingsKey.defaultRemindersListID) }
+    }
+
+    var defaultRemindersListName: String? {
+        get { UserDefaults.standard.string(forKey: SettingsKey.defaultRemindersListName) }
+        set { UserDefaults.standard.set(newValue, forKey: SettingsKey.defaultRemindersListName) }
+    }
+
+    @discardableResult
+    func ensureRemindersList(for folder: MeetingCollection) -> ReminderListInfo? {
+        guard !folder.remindersDisabled, RemindersSyncService.hasAccess else { return nil }
+        if let existingID = folder.remindersListID,
+           let existing = reminders.list(forID: existingID) {
+            return existing
+        }
+        guard UserDefaults.standard.bool(forKey: SettingsKey.remindersMirrorFolders) else { return nil }
+        let trimmed = folder.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let list = reminders.listNamed(trimmed) ?? reminders.createList(named: trimmed) else { return nil }
+        library.updateCollection(
+            folder.id,
+            remindersListID: .some(list.id),
+            remindersListName: .some(list.title),
+            remindersDisabled: false
+        )
+        return list
+    }
+
+    @discardableResult
+    func syncFolderReminderLists() -> [ReminderListInfo] {
+        guard RemindersSyncService.hasAccess else { return [] }
+        reminders.refreshLists()
+        var out: [ReminderListInfo] = []
+        for folder in library.collections where !folder.remindersDisabled {
+            if let list = ensureRemindersList(for: folder) {
+                out.append(list)
+            }
+        }
+        return out
+    }
+
+    func resolvedRemindersListID(itemListID: String?,
+                                 itemPinned: Bool = true,
+                                 meta: MeetingMeta,
+                                 createFolderListIfNeeded: Bool = false) -> String? {
+        let folder = library.collection(meta.collectionID)
+        let effectiveItemListID = itemPinned ? itemListID : nil
+        var effectiveFolder = folder
+        if let folder, !folder.remindersDisabled, (folder.remindersListID ?? "").isEmpty,
+           UserDefaults.standard.bool(forKey: SettingsKey.remindersMirrorFolders),
+           (effectiveItemListID ?? "").isEmpty, (meta.remindersListID ?? "").isEmpty {
+            if createFolderListIfNeeded, let ensured = ensureRemindersList(for: folder) {
+                effectiveFolder?.remindersListID = ensured.id
+                effectiveFolder?.remindersListName = ensured.title
+            } else if let existing = reminders.listNamed(folder.name) {
+                effectiveFolder?.remindersListID = existing.id
+                effectiveFolder?.remindersListName = existing.title
+            }
+        }
+        return ReminderRouting.resolveListID(
+            itemListID: effectiveItemListID,
+            meetingListID: meta.remindersListID,
+            folder: effectiveFolder,
+            globalDefaultListID: defaultRemindersListID,
+            fallbackListID: reminders.defaultListID()
+        )
+    }
+
+    func resolvedRemindersListName(meta: MeetingMeta) -> String {
+        let folder = library.collection(meta.collectionID)
+        let mirrorFolders = UserDefaults.standard.bool(forKey: SettingsKey.remindersMirrorFolders)
+        return ReminderRouting.resolveListLabel(
+            meetingMeta: meta,
+            folder: folder,
+            globalDefaultListName: reminders.list(forID: defaultRemindersListID)?.title ?? defaultRemindersListName,
+            mirrorFolders: mirrorFolders
+        )
+    }
+
+    func autoSyncRemindersIfNeeded(for folder: MeetingFolder) {
+        guard RemindersSyncService.hasAccess,
+              UserDefaults.standard.bool(forKey: SettingsKey.remindersAutoSync) else { return }
+        syncMeetingActionItemsToReminders(folder, includeAllOpen: false)
+    }
+
+    func meetingFolderChangedForReminders(_ folder: MeetingFolder) {
+        guard RemindersSyncService.hasAccess else { return }
+        Task {
+            guard let meta = try? folder.readMeta(),
+                  (meta.remindersListID ?? "").isEmpty,
+                  let summary = (try? folder.read(MeetingSummary.self, .summary)) ?? nil else { return }
+            let syncedItems = summary.actionItems.filter { $0.reminderID != nil && !$0.reminderListPinned }
+            guard !syncedItems.isEmpty else { return }
+            let collection = library.collection(meta.collectionID)
+            if collection?.remindersDisabled == true { return }
+            let targetListID = resolvedRemindersListID(itemListID: nil, itemPinned: false, meta: meta, createFolderListIfNeeded: true)
+            let otherCount = max(
+                hub.snapshotsByID[folder.id]?.participantNames.count ?? 0,
+                meta.calendarAttendees.filter { $0.status != .declined }.count
+            )
+            let prefetched = await reminders.prefetchReminderIndex()
+            var changed = false
+            for item in syncedItems {
+                if let saved = await reminders.upsertReminder(
+                    item: item,
+                    folder: folder,
+                    meta: meta,
+                    collection: collection,
+                    targetListID: targetListID,
+                    recorderName: Self.recorderName,
+                    otherParticipantCount: otherCount,
+                    prefetchedIndex: prefetched
+                ) {
+                    await persistActionItemReminder(
+                        itemID: item.id,
+                        in: folder,
+                        reminderID: saved.reminderID,
+                        listID: saved.listID,
+                        listName: saved.listName
+                    )
+                    changed = true
+                }
+            }
+            if changed {
+                library.refresh(folder)
+                bumpDocumentRevision(folder)
+                hub.refreshMeeting(folder, recorderName: Self.recorderName)
+            }
+        }
+    }
+
+    func sendActionItemToReminders(_ item: ActionItem, in folder: MeetingFolder, listID: String? = nil, document: MeetingDocument? = nil) {
+        Task {
+            if !RemindersSyncService.hasAccess {
+                let ok = await reminders.requestAccess()
+                guard ok else { return }
+                reminders.start()
+            }
+            guard let meta = try? folder.readMeta(),
+                  let summary = (try? folder.read(MeetingSummary.self, .summary)) ?? nil,
+                  let currentItem = summary.actionItems.first(where: { $0.id == item.id }) ?? Optional(item) else { return }
+            let explicitPin = (listID != nil)
+            let targetListID = listID ?? resolvedRemindersListID(
+                itemListID: currentItem.reminderListID,
+                itemPinned: currentItem.reminderListPinned,
+                meta: meta,
+                createFolderListIfNeeded: true
+            )
+            let collection = library.collection(meta.collectionID)
+            let transcript = (try? folder.read(Transcript.self, .transcript)) ?? nil
+            let otherCount = max(
+                Set((transcript?.segments ?? []).filter { $0.source == .system && $0.speaker != SpeakerNames.youID }.map(\.speaker)).count,
+                meta.calendarAttendees.filter { $0.status != .declined }.count
+            )
+            guard let saved = await reminders.upsertReminder(
+                item: currentItem,
+                folder: folder,
+                meta: meta,
+                collection: collection,
+                targetListID: targetListID,
+                recorderName: Self.recorderName,
+                otherParticipantCount: otherCount
+            ) else {
+                if let err = reminders.lastError { showRemindersNotice(err) }
+                return
+            }
+
+            let finalPinned = explicitPin ? true : currentItem.reminderListPinned
+            if let document, document.folder == folder {
+                document.updateActionItemReminder(currentItem, reminderID: saved.reminderID, listID: saved.listID, listName: saved.listName, pinned: finalPinned)
+            } else {
+                await persistActionItemReminder(itemID: currentItem.id, in: folder, reminderID: saved.reminderID, listID: saved.listID, listName: saved.listName, pinned: finalPinned)
+            }
+            library.refresh(folder)
+            bumpDocumentRevision(folder)
+            hub.refreshMeeting(folder, recorderName: Self.recorderName)
+        }
+    }
+
+    func unlinkActionItemFromReminders(_ item: ActionItem, in folder: MeetingFolder, deleteInReminders: Bool, document: MeetingDocument? = nil) {
+        Task {
+            if deleteInReminders, let rid = item.reminderID {
+                await reminders.removeReminder(reminderID: rid)
+            }
+            if let document, document.folder == folder {
+                document.updateActionItemReminder(item, reminderID: nil, listID: nil, listName: nil, pinned: false)
+            } else {
+                await persistActionItemReminder(itemID: item.id, in: folder, reminderID: nil, listID: nil, listName: nil, pinned: false)
+            }
+            library.refresh(folder)
+            bumpDocumentRevision(folder)
+            hub.refreshMeeting(folder, recorderName: Self.recorderName)
+        }
+    }
+
+    func setMeetingRemindersList(_ folder: MeetingFolder, listID: String?, listName: String?, document: MeetingDocument? = nil) {
+        if let document, document.folder == folder {
+            document.setRemindersList(id: listID, name: listName)
+        } else {
+            _ = try? folder.updateMeta {
+                $0.remindersListID = listID
+                $0.remindersListName = listName
+            }
+        }
+        library.refresh(folder)
+        hub.refreshMeeting(folder, recorderName: Self.recorderName)
+
+        // Move already-synced items in this meeting to the newly chosen list.
+        Task {
+            guard RemindersSyncService.hasAccess,
+                  let meta = try? folder.readMeta(),
+                  let summary = (try? folder.read(MeetingSummary.self, .summary)) ?? nil else { return }
+            let resolved = resolvedRemindersListID(itemListID: nil, itemPinned: false, meta: meta, createFolderListIfNeeded: true)
+            let collection = library.collection(meta.collectionID)
+            let prefetched = await reminders.prefetchReminderIndex()
+            for item in summary.actionItems where item.reminderID != nil {
+                if let saved = await reminders.upsertReminder(
+                    item: item,
+                    folder: folder,
+                    meta: meta,
+                    collection: collection,
+                    targetListID: resolved,
+                    recorderName: Self.recorderName,
+                    otherParticipantCount: meta.calendarAttendees.filter { $0.status != .declined }.count,
+                    prefetchedIndex: prefetched
+                ) {
+                    if let document, document.folder == folder {
+                        document.updateActionItemReminder(item, reminderID: saved.reminderID, listID: saved.listID, listName: saved.listName, pinned: false)
+                    } else {
+                        await persistActionItemReminder(itemID: item.id, in: folder, reminderID: saved.reminderID, listID: saved.listID, listName: saved.listName, pinned: false)
+                    }
+                }
+            }
+            bumpDocumentRevision(folder)
+            hub.refreshMeeting(folder, recorderName: Self.recorderName)
+        }
+    }
+
+    func syncMeetingActionItemsToReminders(_ folder: MeetingFolder, includeAllOpen: Bool, document: MeetingDocument? = nil) {
+        Task {
+            if !RemindersSyncService.hasAccess {
+                let ok = await reminders.requestAccess()
+                guard ok else { return }
+                reminders.start()
+            }
+            guard let meta = try? folder.readMeta(),
+                  let summary = (try? folder.read(MeetingSummary.self, .summary)) ?? nil else { return }
+            let collection = library.collection(meta.collectionID)
+            let transcript = (try? folder.read(Transcript.self, .transcript)) ?? nil
+            let otherCount = max(
+                Set((transcript?.segments ?? []).filter { $0.source == .system && $0.speaker != SpeakerNames.youID }.map(\.speaker)).count,
+                meta.calendarAttendees.filter { $0.status != .declined }.count
+            )
+            let autoSync = UserDefaults.standard.bool(forKey: SettingsKey.remindersAutoSync)
+            let includeWaiting = UserDefaults.standard.bool(forKey: SettingsKey.remindersIncludeWaitingOnOthers)
+            let prefetched = await reminders.prefetchReminderIndex()
+            var count = 0
+
+            for item in summary.actionItems where !item.dismissed {
+                if item.done && item.reminderID == nil { continue }
+                let rel = CommitmentsRadar.classifyRelevance(item, recorderName: Self.recorderName, otherParticipantCount: otherCount)
+                let eligible: Bool
+                if item.reminderID != nil {
+                    eligible = true
+                } else if includeAllOpen {
+                    eligible = (rel == .mine || (includeWaiting && rel == .relatedToMe))
+                } else {
+                    eligible = ReminderRouting.shouldAutoSync(item: item, relevance: rel, meetingMeta: meta, folder: collection,
+                                                              globalAutoSync: autoSync, includeWaitingOnOthers: includeWaiting)
+                }
+                guard eligible else { continue }
+                let targetListID = resolvedRemindersListID(
+                    itemListID: item.reminderListID,
+                    itemPinned: item.reminderListPinned,
+                    meta: meta,
+                    createFolderListIfNeeded: true
+                )
+                if let saved = await reminders.upsertReminder(
+                    item: item,
+                    folder: folder,
+                    meta: meta,
+                    collection: collection,
+                    targetListID: targetListID,
+                    recorderName: Self.recorderName,
+                    otherParticipantCount: otherCount,
+                    prefetchedIndex: prefetched
+                ) {
+                    if let document, document.folder == folder {
+                        document.updateActionItemReminder(item, reminderID: saved.reminderID, listID: saved.listID, listName: saved.listName)
+                    } else {
+                        await persistActionItemReminder(itemID: item.id, in: folder, reminderID: saved.reminderID, listID: saved.listID, listName: saved.listName)
+                    }
+                    count += 1
+                }
+            }
+            library.refresh(folder)
+            bumpDocumentRevision(folder)
+            hub.refreshMeeting(folder, recorderName: Self.recorderName)
+            if includeAllOpen {
+                if let err = reminders.lastError {
+                    showRemindersNotice(err)
+                } else {
+                    showRemindersNotice("Synced \(count) item\(count == 1 ? "" : "s") to Reminders")
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    func syncOpenCommitmentsToReminders() async -> Int {
+        if !RemindersSyncService.hasAccess {
+            let ok = await reminders.requestAccess()
+            guard ok else { return 0 }
+            reminders.start()
+        }
+        await pullRemindersChangesAsync()
+        let includeWaiting = UserDefaults.standard.bool(forKey: SettingsKey.remindersIncludeWaitingOnOthers)
+        let openItems = hub.commitments.filter { item in
+            guard !item.actionItem.dismissed, item.ageDays <= 45 else { return false }
+            if item.actionItem.done && item.actionItem.reminderID == nil { return false }
+            if item.actionItem.reminderID != nil { return true }
+            if item.relevance == .mine { return true }
+            return includeWaiting && item.relevance == .relatedToMe
+        }
+        let prefetched = await reminders.prefetchReminderIndex()
+        var syncedCount = 0
+        var touchedFolders: Set<MeetingFolder> = []
+        for commitment in openItems {
+            let folder = commitment.meetingFolder
+            guard let meta = hub.snapshotsByID[folder.id]?.meta ?? (try? folder.readMeta()) else { continue }
+            let collection = library.collection(meta.collectionID)
+            if collection?.remindersDisabled == true,
+               (meta.remindersListID ?? "").isEmpty,
+               !commitment.actionItem.reminderListPinned {
+                continue
+            }
+            let targetListID = resolvedRemindersListID(
+                itemListID: commitment.actionItem.reminderListID,
+                itemPinned: commitment.actionItem.reminderListPinned,
+                meta: meta,
+                createFolderListIfNeeded: true
+            )
+            let otherCount = max(
+                hub.snapshotsByID[folder.id]?.participantNames.count ?? 0,
+                meta.calendarAttendees.filter { $0.status != .declined }.count
+            )
+            if let saved = await reminders.upsertReminder(
+                item: commitment.actionItem,
+                folder: folder,
+                meta: meta,
+                collection: collection,
+                targetListID: targetListID,
+                recorderName: Self.recorderName,
+                otherParticipantCount: otherCount,
+                prefetchedIndex: prefetched
+            ) {
+                await persistActionItemReminder(
+                    itemID: commitment.actionItem.id,
+                    in: folder,
+                    reminderID: saved.reminderID,
+                    listID: saved.listID,
+                    listName: saved.listName
+                )
+                syncedCount += 1
+                touchedFolders.insert(folder)
+            }
+        }
+        for folder in touchedFolders {
+            library.refresh(folder)
+            bumpDocumentRevision(folder)
+            hub.refreshMeeting(folder, recorderName: Self.recorderName)
+        }
+        if let err = reminders.lastError {
+            showRemindersNotice(err)
+        }
+        return syncedCount
+    }
+
+    @discardableResult
+    func syncCollectionReminders(_ collection: MeetingCollection) async -> Int {
+        if !RemindersSyncService.hasAccess {
+            let ok = await reminders.requestAccess()
+            guard ok else { return 0 }
+            reminders.start()
+        }
+        if collection.remindersDisabled {
+            showRemindersNotice("\u{201C}\(collection.name)\u{201D} has Reminders sync turned off.")
+            return 0
+        }
+        _ = ensureRemindersList(for: collection)
+        await pullRemindersChangesAsync()
+
+        let includeWaiting = UserDefaults.standard.bool(forKey: SettingsKey.remindersIncludeWaitingOnOthers)
+        let folderItems = library.items.filter { $0.meta.status != .recording && $0.meta.collectionID == collection.id }
+        let prefetched = await reminders.prefetchReminderIndex()
+        var syncedCount = 0
+        for meetingItem in folderItems {
+            let folder = meetingItem.folder
+            guard let meta = try? folder.readMeta(),
+                  let summary = (try? folder.read(MeetingSummary.self, .summary)) ?? nil else { continue }
+            let transcript = (try? folder.read(Transcript.self, .transcript)) ?? nil
+            let otherCount = max(
+                Set((transcript?.segments ?? []).filter { $0.source == .system && $0.speaker != SpeakerNames.youID }.map(\.speaker)).count,
+                meta.calendarAttendees.filter { $0.status != .declined }.count
+            )
+            var didTouch = false
+            for item in summary.actionItems where !item.dismissed {
+                if item.done && item.reminderID == nil { continue }
+                let rel = CommitmentsRadar.classifyRelevance(item, recorderName: Self.recorderName, otherParticipantCount: otherCount)
+                let eligible = (item.reminderID != nil) || rel == .mine || (includeWaiting && rel == .relatedToMe)
+                guard eligible else { continue }
+                let targetListID = resolvedRemindersListID(
+                    itemListID: item.reminderListID,
+                    itemPinned: item.reminderListPinned,
+                    meta: meta,
+                    createFolderListIfNeeded: true
+                )
+                if let saved = await reminders.upsertReminder(
+                    item: item,
+                    folder: folder,
+                    meta: meta,
+                    collection: library.collection(collection.id) ?? collection,
+                    targetListID: targetListID,
+                    recorderName: Self.recorderName,
+                    otherParticipantCount: otherCount,
+                    prefetchedIndex: prefetched
+                ) {
+                    await persistActionItemReminder(
+                        itemID: item.id,
+                        in: folder,
+                        reminderID: saved.reminderID,
+                        listID: saved.listID,
+                        listName: saved.listName
+                    )
+                    syncedCount += 1
+                    didTouch = true
+                }
+            }
+            if didTouch {
+                library.refresh(folder)
+                bumpDocumentRevision(folder)
+                hub.refreshMeeting(folder, recorderName: Self.recorderName)
+            }
+        }
+        if let err = reminders.lastError {
+            showRemindersNotice(err)
+        } else {
+            let listTitle = library.collection(collection.id)?.remindersListName ?? collection.name
+            showRemindersNotice("Synced \(syncedCount) item\(syncedCount == 1 ? "" : "s") to \u{201C}\(listTitle)\u{201D}")
+        }
+        return syncedCount
+    }
+
+    @discardableResult
+    func syncCommitmentsToReminders(_ items: [CommitmentItem]) async -> Int {
+        if !RemindersSyncService.hasAccess {
+            let ok = await reminders.requestAccess()
+            guard ok else { return 0 }
+            reminders.start()
+        }
+        await pullRemindersChangesAsync()
+        let prefetched = await reminders.prefetchReminderIndex()
+        var syncedCount = 0
+        var touchedFolders: Set<MeetingFolder> = []
+        for commitment in items where !commitment.actionItem.dismissed {
+            if commitment.actionItem.done && commitment.actionItem.reminderID == nil { continue }
+            let folder = commitment.meetingFolder
+            guard let meta = hub.snapshotsByID[folder.id]?.meta ?? (try? folder.readMeta()) else { continue }
+            let collection = library.collection(meta.collectionID)
+            let targetListID = resolvedRemindersListID(
+                itemListID: commitment.actionItem.reminderListID,
+                itemPinned: commitment.actionItem.reminderListPinned,
+                meta: meta,
+                createFolderListIfNeeded: true
+            )
+            let otherCount = max(
+                hub.snapshotsByID[folder.id]?.participantNames.count ?? 0,
+                meta.calendarAttendees.filter { $0.status != .declined }.count
+            )
+            if let saved = await reminders.upsertReminder(
+                item: commitment.actionItem,
+                folder: folder,
+                meta: meta,
+                collection: collection,
+                targetListID: targetListID,
+                recorderName: Self.recorderName,
+                otherParticipantCount: otherCount,
+                prefetchedIndex: prefetched
+            ) {
+                await persistActionItemReminder(
+                    itemID: commitment.actionItem.id,
+                    in: folder,
+                    reminderID: saved.reminderID,
+                    listID: saved.listID,
+                    listName: saved.listName
+                )
+                syncedCount += 1
+                touchedFolders.insert(folder)
+            }
+        }
+        for folder in touchedFolders {
+            library.refresh(folder)
+            bumpDocumentRevision(folder)
+            hub.refreshMeeting(folder, recorderName: Self.recorderName)
+        }
+        if let err = reminders.lastError {
+            showRemindersNotice(err)
+        }
+        return syncedCount
+    }
+
+    func pullRemindersChanges() {
+        Task { await pullRemindersChangesAsync() }
+    }
+
+    private func pullRemindersChangesAsync() async {
+        guard RemindersSyncService.hasAccess else { return }
+        lastPullAt = Date()
+        let folders = library.items.filter { $0.meta.status != .recording }.map(\.folder)
+        guard !folders.isEmpty else { return }
+        let changed = await reminders.pullChanges(folders: folders)
+        guard !changed.isEmpty else { return }
+        for folder in changed {
+            library.refresh(folder)
+            bumpDocumentRevision(folder)
+            exportMarkdown(for: folder)
+            hub.refreshMeeting(folder, recorderName: Self.recorderName)
+        }
+    }
+
+    func handleDeepLink(_ url: URL) {
+        if url.scheme?.lowercased() == "remeet",
+           url.host?.lowercased() == "settings",
+           url.path.lowercased().contains("reminders") {
+            openSettings(pane: .reminders)
+            return
+        }
+        guard let parsed = ReminderRouting.parseDeepLink(url) else { return }
+        let match = library.items.first { $0.id == parsed.folderID || $0.folder.name == parsed.folderID }
+        guard let match else {
+            openMeetings()
+            return
+        }
+        if let t = parsed.timestamp {
+            transcriptJump = t
+            pendingCitationPlay = t
+        }
+        openMeetings(selecting: match.folder)
+    }
+
+    private func persistActionItemReminder(itemID: String,
+                                           in folder: MeetingFolder,
+                                           reminderID: String?,
+                                           listID: String?,
+                                           listName: String?,
+                                           pinned: Bool? = nil) async {
+        _ = await Task.detached(priority: .userInitiated) { () -> Bool in
+            guard var summary = (try? folder.read(MeetingSummary.self, .summary)) ?? nil,
+                  let idx = summary.actionItems.firstIndex(where: { $0.id == itemID }) else { return false }
+            summary.actionItems[idx].reminderID = reminderID
+            summary.actionItems[idx].reminderListID = listID
+            summary.actionItems[idx].reminderListName = listName
+            if reminderID == nil {
+                summary.actionItems[idx].reminderListPinned = false
+            } else if let pinned {
+                summary.actionItems[idx].reminderListPinned = pinned
+            }
+            try? folder.write(summary, .summary)
+            return true
+        }.value
     }
 }
 

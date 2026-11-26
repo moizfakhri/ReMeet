@@ -43,19 +43,35 @@ final class MeetingLibrary {
     }
 
     @discardableResult
-    func createCollection(named name: String, context: String = "", exportDirectoryPath: String? = nil) -> MeetingCollection? {
+    func createCollection(named name: String,
+                          context: String = "",
+                          exportDirectoryPath: String? = nil,
+                          remindersListID: String? = nil,
+                          remindersListName: String? = nil,
+                          remindersDisabled: Bool = false) -> MeetingCollection? {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         let cleanedExport = exportDirectoryPath?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let collection = MeetingCollection(name: trimmed, context: context,
-                                           exportDirectoryPath: (cleanedExport?.isEmpty == false) ? cleanedExport : nil)
+        let collection = MeetingCollection(
+            name: trimmed,
+            context: context,
+            exportDirectoryPath: (cleanedExport?.isEmpty == false) ? cleanedExport : nil,
+            remindersListID: (remindersListID?.isEmpty == false) ? remindersListID : nil,
+            remindersListName: (remindersListName?.isEmpty == false) ? remindersListName : nil,
+            remindersDisabled: remindersDisabled
+        )
         saveCollections(collections + [collection])
         return collection
     }
 
-    /// Pass `exportDirectoryPath: .some(nil)` to clear the export folder, or `.none` to leave it unchanged.
-    func updateCollection(_ id: String, name: String? = nil, context: String? = nil,
-                          exportDirectoryPath: String?? = nil) {
+    /// Pass `.some(nil)` to clear an optional field, or `.none` to leave it unchanged.
+    func updateCollection(_ id: String,
+                          name: String? = nil,
+                          context: String? = nil,
+                          exportDirectoryPath: String?? = nil,
+                          remindersListID: String?? = nil,
+                          remindersListName: String?? = nil,
+                          remindersDisabled: Bool? = nil) {
         var list = collections
         guard let index = list.firstIndex(where: { $0.id == id }) else { return }
         let oldExport = list[index].exportDirectoryPath
@@ -68,6 +84,17 @@ final class MeetingLibrary {
         if let exportDirectoryPath {
             let trimmed = exportDirectoryPath?.trimmingCharacters(in: .whitespacesAndNewlines)
             list[index].exportDirectoryPath = (trimmed?.isEmpty == false) ? trimmed : nil
+        }
+        if let remindersListID {
+            let trimmed = remindersListID?.trimmingCharacters(in: .whitespacesAndNewlines)
+            list[index].remindersListID = (trimmed?.isEmpty == false) ? trimmed : nil
+        }
+        if let remindersListName {
+            let trimmed = remindersListName?.trimmingCharacters(in: .whitespacesAndNewlines)
+            list[index].remindersListName = (trimmed?.isEmpty == false) ? trimmed : nil
+        }
+        if let remindersDisabled {
+            list[index].remindersDisabled = remindersDisabled
         }
         saveCollections(list)
         let updated = list[index]
@@ -87,6 +114,7 @@ final class MeetingLibrary {
         _ = try? folder.updateMeta { $0.collectionID = collectionID }
         refresh(folder)
         onEdited?(folder)
+        onMeetingMoved?(folder, collectionID)
     }
 
     /// Drag a folder to a new place in the list.
@@ -170,6 +198,8 @@ final class MeetingLibrary {
 
     /// Called after a user edit (rename, notes, folder move) so search and exports stay current.
     var onEdited: ((MeetingFolder) -> Void)?
+    /// Called after a meeting is moved into or out of a folder.
+    var onMeetingMoved: ((MeetingFolder, String?) -> Void)?
     /// Called after a folder's export path (or its name/context while exported) changes.
     var onCollectionExportChanged: ((MeetingCollection) -> Void)?
     /// Called after a meeting is moved to the Trash so queues, badges and search stay clean.

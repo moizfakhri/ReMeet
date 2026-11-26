@@ -208,25 +208,55 @@ final class MeetingDocument {
         }
     }
 
-    func setActionItem(_ item: ActionItem, done: Bool) {
-        guard var summary, let index = summary.actionItems.firstIndex(of: item) else { return }
+    @discardableResult
+    func setActionItem(_ item: ActionItem, done: Bool) -> String? {
+        guard var summary, let index = summary.actionItems.firstIndex(where: { $0.id == item.id }) else { return item.reminderID }
         summary.actionItems[index].done = done
+        let rid = summary.actionItems[index].reminderID
         self.summary = summary
         try? folder.write(summary, .summary)
         writeSummaryMarkdown()
+        return rid
     }
 
     func updateActionItem(_ item: ActionItem,
                           owner: String?? = nil,
                           relatesToMe: Bool?? = nil,
                           dismissed: Bool? = nil) {
-        guard var summary, let index = summary.actionItems.firstIndex(of: item) else { return }
+        guard var summary, let index = summary.actionItems.firstIndex(where: { $0.id == item.id }) else { return }
         if let owner { summary.actionItems[index].owner = owner }
         if let relatesToMe { summary.actionItems[index].relatesToMe = relatesToMe }
         if let dismissed { summary.actionItems[index].dismissed = dismissed }
         self.summary = summary
         try? folder.write(summary, .summary)
         writeSummaryMarkdown()
+    }
+
+    func updateActionItemReminder(_ item: ActionItem,
+                                  reminderID: String?,
+                                  listID: String?,
+                                  listName: String?,
+                                  pinned: Bool? = nil) {
+        guard var summary, let index = summary.actionItems.firstIndex(where: { $0.id == item.id }) else { return }
+        summary.actionItems[index].reminderID = reminderID
+        summary.actionItems[index].reminderListID = listID
+        summary.actionItems[index].reminderListName = listName
+        if reminderID == nil {
+            summary.actionItems[index].reminderListPinned = false
+        } else if let pinned {
+            summary.actionItems[index].reminderListPinned = pinned
+        }
+        self.summary = summary
+        try? folder.write(summary, .summary)
+    }
+
+    func setRemindersList(id: String?, name: String?) {
+        if let updated = try? folder.updateMeta({
+            $0.remindersListID = id
+            $0.remindersListName = name
+        }) {
+            meta = updated
+        }
     }
 
     /// Renames one voice in this meeting. Other speaker ids are not touched.
@@ -360,7 +390,12 @@ final class MeetingDocument {
         let meetingsDir = folder.url.deletingLastPathComponent()
         let peopleURL = PeopleFile.url(beside: meetingsDir)
         var store = PeopleFile.load(peopleURL)
-        let matchingAttendee = meta.calendarAttendees.first { SpeakerMemory.namesMatch($0.name, trimmed) }
+        let nonDeclined = meta.calendarAttendees.filter { $0.status != .declined }
+        let matchingAttendee: CalendarAttendee? = nonDeclined.first(where: { SpeakerMemory.namesMatch($0.name, trimmed) })
+            ?? {
+                let prefixHits = nonDeclined.filter { SpeakerMemory.namesPrefixMatch($0.name, trimmed) }
+                return prefixHits.count == 1 ? prefixHits[0] : nil
+            }()
         _ = store.upsert(
             name: trimmed,
             email: matchingAttendee?.email,

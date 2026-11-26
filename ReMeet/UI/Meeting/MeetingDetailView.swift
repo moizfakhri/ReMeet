@@ -171,6 +171,7 @@ struct MeetingDetailView: View {
             // Row 2: Compact wrapping pill controls for folder, speakers, wording, calendar, and follow-up.
             WrappingFlowLayout(spacing: 7, lineSpacing: 7) {
                 folderMenu
+                remindersListMenu
                 callSpeakerMenu
                 engineMenu
                 if let eventID = document.meta.calendarEventID {
@@ -339,6 +340,78 @@ struct MeetingDetailView: View {
         .overlay(Capsule().stroke(current != nil ? Theme.accent.opacity(0.25) : Theme.line))
         .help(current?.exportDirectoryPath.map { "In \u{201C}\(current!.name)\u{201D} · auto-exporting .md to \($0)" }
               ?? "Assign this meeting to a folder")
+    }
+
+    private var remindersListMenu: some View {
+        let resolvedLabel = model.resolvedRemindersListName(meta: document.meta)
+        let hasOverride = (document.meta.remindersListID ?? "").isEmpty == false
+        return Menu {
+            Button {
+                model.setMeetingRemindersList(document.folder, listID: nil, listName: nil, document: document)
+            } label: {
+                if !hasOverride {
+                    Label("Use folder / default", systemImage: "checkmark")
+                } else {
+                    Text("Use folder / default")
+                }
+            }
+
+            if !model.reminders.availableLists.isEmpty {
+                Divider()
+                Section("Route this meeting to") {
+                    ForEach(model.reminders.availableLists) { list in
+                        Button {
+                            model.setMeetingRemindersList(document.folder, listID: list.id, listName: list.title, document: document)
+                        } label: {
+                            if document.meta.remindersListID == list.id {
+                                Label(list.title, systemImage: "checkmark")
+                            } else {
+                                Text(list.title)
+                            }
+                        }
+                    }
+                }
+            }
+
+            if document.summary != nil {
+                Divider()
+                Button("Sync open items to Apple Reminders") {
+                    model.syncMeetingActionItemsToReminders(document.folder, includeAllOpen: true, document: document)
+                }
+            }
+
+            if !RemindersSyncService.hasAccess {
+                Divider()
+                Button("Connect Apple Reminders…") {
+                    Task {
+                        if await model.reminders.requestAccess() {
+                            model.reminders.start()
+                        } else {
+                            model.openSettings(pane: .reminders)
+                        }
+                    }
+                }
+            } else {
+                Button("Open Apple Reminders") {
+                    model.reminders.openRemindersApp()
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "checklist")
+                    .font(.system(size: 10.5))
+                Text(resolvedLabel)
+                    .lineLimit(1)
+            }
+            .foregroundStyle(hasOverride ? Theme.accent : Theme.fg2)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+        .background(hasOverride ? Theme.mark : Theme.bg, in: Capsule())
+        .overlay(Capsule().stroke(hasOverride ? Theme.accent.opacity(0.25) : Theme.line))
+        .help("Apple Reminders list for action items in this meeting")
     }
 
     private var callSpeakerMenu: some View {
@@ -619,9 +692,13 @@ private struct SummarySections: View {
         ActionItemRow(
             item: item,
             tier: tier,
+            availableReminderLists: model.reminders.availableLists,
             onJump: onJump,
             onToggle: { done in
-                document.setActionItem(item, done: done)
+                let rid = document.setActionItem(item, done: done)
+                if let rid {
+                    Task { await model.reminders.syncCompletion(reminderID: rid, done: done) }
+                }
                 model.documentEdited(document)
             },
             onAssignToYou: {
@@ -635,6 +712,12 @@ private struct SummarySections: View {
             onDismiss: {
                 document.updateActionItem(item, dismissed: true)
                 model.documentEdited(document)
+            },
+            onSendToReminders: { listID in
+                model.sendActionItemToReminders(item, in: document.folder, listID: listID, document: document)
+            },
+            onUnlinkReminder: { deleteInReminders in
+                model.unlinkActionItemFromReminders(item, in: document.folder, deleteInReminders: deleteInReminders, document: document)
             }
         )
     }
@@ -664,11 +747,14 @@ struct BulletRow: View {
 private struct ActionItemRow: View {
     let item: ActionItem
     let tier: CommitmentItem.Relevance
+    let availableReminderLists: [ReminderListInfo]
     let onJump: (Double) -> Void
     let onToggle: (Bool) -> Void
     let onAssignToYou: () -> Void
     let onSetRelated: (Bool) -> Void
     let onDismiss: () -> Void
+    let onSendToReminders: (String?) -> Void
+    let onUnlinkReminder: (Bool) -> Void
     @State private var hovering = false
 
     var body: some View {
@@ -685,6 +771,46 @@ private struct ActionItemRow: View {
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 8)
             if let t = item.t { JumpLink(t: t, action: onJump, visible: hovering) }
+            if let rid = item.reminderID, !rid.isEmpty {
+                let listLabel = item.reminderListName ?? "Reminders"
+                Menu {
+                    if !availableReminderLists.isEmpty {
+                        Section("Move to list") {
+                            ForEach(availableReminderLists) { list in
+                                Button {
+                                    onSendToReminders(list.id)
+                                } label: {
+                                    if list.id == item.reminderListID {
+                                        Label(list.title, systemImage: "checkmark")
+                                    } else {
+                                        Text(list.title)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Divider()
+                    Button("Unlink from ReMeet") { onUnlinkReminder(false) }
+                    Button("Delete from Apple Reminders", role: .destructive) { onUnlinkReminder(true) }
+                } label: {
+                    HStack(spacing: 3.5) {
+                        Image(systemName: "checklist")
+                            .font(.system(size: 9.5, weight: .semibold))
+                        Text(listLabel)
+                            .font(.system(size: 11, weight: .semibold))
+                            .lineLimit(1)
+                    }
+                    .foregroundStyle(Theme.accent)
+                    .padding(.horizontal, 7.5)
+                    .padding(.vertical, 2)
+                    .background(Theme.mark, in: Capsule())
+                    .overlay(Capsule().stroke(Theme.accent.opacity(0.25)))
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Synced to Apple Reminders list \u{201C}\(listLabel)\u{201D}")
+            }
             if !meta.isEmpty {
                 Text(meta)
                     .font(.system(size: 11.5, weight: .medium))
@@ -695,6 +821,25 @@ private struct ActionItemRow: View {
                     .overlay(Capsule().stroke(tier == .mine ? Theme.accent.opacity(0.25) : Theme.line))
             }
             Menu {
+                if item.reminderID == nil {
+                    Button("Send to Apple Reminders") { onSendToReminders(nil) }
+                    if !availableReminderLists.isEmpty {
+                        Menu("Send to Reminders list") {
+                            ForEach(availableReminderLists) { list in
+                                Button(list.title) { onSendToReminders(list.id) }
+                            }
+                        }
+                    }
+                    Divider()
+                } else if !availableReminderLists.isEmpty {
+                    Menu("Move to Reminders list") {
+                        ForEach(availableReminderLists) { list in
+                            Button(list.title) { onSendToReminders(list.id) }
+                        }
+                    }
+                    Button("Unlink from Apple Reminders") { onUnlinkReminder(false) }
+                    Divider()
+                }
                 if tier != .mine {
                     Button("Assign to You", action: onAssignToYou)
                 }
@@ -1021,10 +1166,12 @@ private struct SpeakerNamingSection: View {
         let savedName = (document.speakers.names[id] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let dirty = currentDraft != savedName
         let isUnnamed = SpeakerMemory.isPlaceholder(savedName)
+        let peopleStore = PeopleStore(profiles: model.hub.people.map(\.profile))
         let inviteHints = isUnnamed
             ? CalendarSpeakerHints.unassignedInvitees(attendees: document.meta.calendarAttendees,
                                                       existing: document.speakers,
-                                                      recorderName: AppModel.recorderName)
+                                                      recorderName: AppModel.recorderName,
+                                                      store: peopleStore)
             : []
         return VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {

@@ -161,6 +161,16 @@ struct MeetingWindowRoot: View {
         .onChange(of: model.requestedTab) { applyRequestedTabAndTargets() }
         .onChange(of: model.selectedPersonID) { applyRequestedTabAndTargets() }
         .onChange(of: model.selectedCalendarEventID) { applyRequestedTabAndTargets() }
+        .onChange(of: model.documentRevisions) { oldMap, newMap in
+            for (id, rev) in newMap where oldMap[id] != rev {
+                if id != document?.folder.id {
+                    cache.removeValue(forKey: id)
+                    cacheOrder.removeAll { $0 == id }
+                } else {
+                    refreshDocument()
+                }
+            }
+        }
         .onChange(of: showTranscript) { _, open in
             if open {
                 if let win = AppModel.meetingsWindow(), win.frame.width < 920, columnVisibility != .detailOnly {
@@ -271,19 +281,25 @@ struct MeetingWindowRoot: View {
 
     @ViewBuilder private var scheduleDetail: some View {
         switch scheduleSelection {
+        case .weekOverview, nil:
+            ScheduleWeekOverviewView(
+                onSelectEvent: { eventID in scheduleSelection = .event(eventID) },
+                onOpenMeeting: { folder, time in openMeetingAt(folder, time) }
+            )
         case .commitmentsRadar:
             CommitmentsRadarDetailView { folder, time in openMeetingAt(folder, time) }
         case .event(let id):
             if let event = model.calendar.events.first(where: { $0.id == id }) {
-                CalendarEventDetailView(event: event) { folder, time in openMeetingAt(folder, time) }
+                CalendarEventDetailView(
+                    event: event,
+                    onBackToWeek: { scheduleSelection = .weekOverview },
+                    onOpenMeeting: { folder, time in openMeetingAt(folder, time) }
+                )
             } else {
-                CommitmentsRadarDetailView { folder, time in openMeetingAt(folder, time) }
-            }
-        case nil:
-            if let next = model.calendar.upcomingMeetings().first {
-                CalendarEventDetailView(event: next) { folder, time in openMeetingAt(folder, time) }
-            } else {
-                CommitmentsRadarDetailView { folder, time in openMeetingAt(folder, time) }
+                ScheduleWeekOverviewView(
+                    onSelectEvent: { eventID in scheduleSelection = .event(eventID) },
+                    onOpenMeeting: { folder, time in openMeetingAt(folder, time) }
+                )
             }
         }
     }
@@ -413,13 +429,7 @@ struct MeetingWindowRoot: View {
             selectedPersonID = model.hub.people.first?.id
         }
         if scheduleSelection == nil {
-            if let next = model.calendar.upcomingMeetings().first {
-                scheduleSelection = .event(next.id)
-            } else if let recent = model.calendar.events.last(where: { MeetingReminder.hasOnlineMeetingPlatform($0) }) {
-                scheduleSelection = .event(recent.id)
-            } else {
-                scheduleSelection = .commitmentsRadar
-            }
+            scheduleSelection = .weekOverview
         }
     }
 
