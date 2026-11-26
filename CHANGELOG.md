@@ -6,6 +6,45 @@ All performance numbers were measured on a **base Apple M4 MacBook Pro (16 GB un
 
 ---
 
+## [2026-11-25] — Two-Way Apple Reminders Sync, Integrated Week/Month Schedule Calendar & People Deduplication
+
+### Added
+- **Two-Way Apple Reminders Sync & Automatic Folder Mirroring (`ReminderRouting`, `ReminderDueDateParser`, `RemindersSyncService`, `AppModel`, `SettingsRoot`, `MeetingSidebar`, `MeetingDetailView`, `HubComponents`, `ScheduleViews`, `Config/ReMeet.entitlements`, `Config/Info.plist`):**
+  - Integrated native macOS EventKit (`EKEventStore`) two-way sync so action items stay synchronized with Apple Reminders (and across iCloud-connected Mac, iPhone, iPad, and Apple Watch) whenever items are completed or edited in either app.
+  - Added 4-tier routing precedence (**per-item custom list** > **per-meeting list override** > **per-folder list / automatic folder mirror** > **global default list**, such as *Work* vs *Reminders*), extensible `ActionItem`, `MeetingMeta`, and `MeetingCollections` fields with backward-compatible JSON decoding, and `ReminderDueDateParser` for natural-language dates (`EOD`, `tomorrow`, weekdays, explicit dates).
+  - Added automatic ReMeet folder → Apple Reminders list mirroring (`mirroredFolderListName`), storing matched `EKCalendar` IDs so users can drag synced lists under a `Work` group in Apple Reminders while keeping folder syncing intact.
+  - Added one-click whole-folder sync (`Sync Folder to Reminders` in sidebar context menus and `FolderEditorSheet`), **Sync This Week / Upcoming Week to Reminders** in Schedule, per-item reminder pills/menus in `CommitmentRowView`, `remeet://meeting/<id>?t=<sec>` and `remeet://settings/reminders` deep links, and macOS `com.apple.security.personal-information.reminders` entitlement + Privacy descriptions.
+- **Integrated Week & Month Schedule Calendar with Smart Focus (`ScheduleWeekFocus`, `WeekFocusPlan`, `ScheduleWeekOverviewView`, `ScheduleViews`, `MeetingWindowRoot`):**
+  - Replaced the plain Schedule list landing view with an interactive **Week** (7-day Mon–Sun grid) and **Month** calendar overview, day-click filtering, and a `← Back to Week` breadcrumb from `CalendarEventDetailView`.
+  - Automatically focuses on **This Week** on workdays and switches to **Upcoming Week** on weekends once no remaining meetings are scheduled, grouping **Action items to focus on** directly under each upcoming call.
+- **Automatic People & Speaker Deduplication (`PersonName`, `PeopleStore`, `SpeakerMemory`, `MeetingReminder`, `KeyMoments`, `CommitmentsAndBriefs`, `HubCoordinator`, `PeopleViews`):**
+  - Added `PersonName` normalization for MS Teams / Outlook / Zoom `"Last, First [Middle]"`, ALL-CAPS invite names, `(External)`/`(Guest)` suffixes, honorifics (`Dr.`/`Prof.`/`Mr.`/`Mrs.`/`Ms.`/`Mx.`), and name suffixes (`Jr.`/`PhD`).
+  - Upgraded `SpeakerMemory.namesMatch`, `PeopleStore.consolidateDuplicates`, `ConversationPulse.compute` (merging duplicate speaker IDs sharing a display name), and `PeopleViews` with clean readable aliases and a one-click merge banner for ambiguous first-name matches.
+
+### Bugs Found & Fixed
+- **Unpinned Items Staying in Previous Lists During Folder Sync (`Documents`, `ReminderRouting`, `AppModel`):**
+  - *Found:* Action items previously synced to a global default list kept their earlier `reminderListID` when the user later synced their parent folder to a folder-specific list.
+  - *Fixed:* Added `ActionItem.reminderListPinned` so only explicitly pinned items override folder/meeting routing; unpinned items follow their folder's Reminders list on sync.
+- **Stale Open Meeting Document & Window Cache After External Sync (`MeetingWindowRoot`, `AppModel`):**
+  - *Found:* Toggling a reminder in Apple Reminders updated `summary.json` on disk, while an open `MeetingDocument` and `MeetingWindowRoot` cache continued displaying old completion state because `meta.json` had not changed.
+  - *Fixed:* Added `AppModel.documentRevisions` notifications and cache eviction in `MeetingWindowRoot` so open meeting views refresh immediately.
+- **Stale `EKEventStore` Cache During Two-Way Sync (`RemindersSyncService`):**
+  - *Found:* `EKEventStore.calendarItem(withIdentifier:)` returned stale cached completion state across external changes in Apple Reminders.
+  - *Fixed:* Switched lookup and pull sync to `store.reset()` + `store.fetchReminders(matching:)` matching both `calendarItemIdentifier` and `calendarItemExternalIdentifier`, shortened echo suppression to 0.5 s, and triggered pull sync on `didBecomeActiveNotification`.
+- **Completed Linked Items Skipped & Stale `reminderID` on Toggle (`AppModel`, `MeetingDocument`):**
+  - *Fixed:* Included already-linked completed items when syncing meetings/folders so completion state propagates reliably, set `completionDate` explicitly, and read fresh `reminderID` values from disk during toggles.
+- **Reminders Permission Discovery & Feedback (`SettingsRoot`, `MeetingSidebar`, `AppModel`):**
+  - *Found:* macOS hides an app from **System Settings → Privacy & Security → Reminders** until `requestFullAccessToReminders()` is invoked at least once, and sidebar folder-sync actions gave no visual confirmation.
+  - *Fixed:* Added `NSRemindersUsageDescription`, prominent **Connect Apple Reminders** / **Request Access** CTAs in Settings, `remeet://settings/reminders`, and transient sidebar `remindersNotice` feedback banners.
+- **`ReminderDueDateParser` Off-By-One-Week Bug for `"next Monday"` (`ReminderRouting`):**
+  - *Fixed:* Adjusted `"next <weekday>"` resolution so `"next Monday"` on a Wednesday resolves to the upcoming Monday (+5 days) rather than jumping +12 days.
+
+### Verification
+- `ReMeetKit` unit tests (`swift test --package-path Packages/ReMeetKit`): **164 / 164 passed** across **41 suites** (including `PeopleDeduplicationTests`, `RemindersRoutingAndDueDateTests`, and `ScheduleWeekFocusTests`).
+- `scripts/selftests.sh` against Release build (`scripts/build.sh`): **76 / 76 passed** (`bubble` 26/26, `compress` 19/19, `player` 8/8, `search` 11/11, `backends` 6/6, `processmonitor` 3/3, `tapfilter` 3/3).
+
+---
+
 ## [2026-11-24] — People & Calendar Hubs, Key Moments, Audio Guardrails, Responsive Split Layout & UX Polish
 
 ### Added

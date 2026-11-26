@@ -69,6 +69,17 @@ account, no server and no subscription.
 - **Calendar sync:** combines Apple Calendar (EventKit) with subscribed Google, Outlook, and iCloud
   `.ics` feeds, deduplicated and filtered to actual online meetings so classes and desk blocks never
   clutter your schedule.
+- **Week &amp; Month Calendar with Smart Focus:** shows your schedule in an interactive 7-day
+  **Week** strip or **Month** grid, automatically focusing on **This Week** on workdays and
+  switching to **Upcoming Week** on weekends once remaining calls finish, with day-click filtering,
+  **Action items to focus on** grouped under each upcoming call, and one-click
+  **Sync This Week / Upcoming Week to Reminders**.
+- **Two-Way Apple Reminders Sync:** syncs action items via native EventKit (staying updated
+  across Mac, iPhone, iPad, and Apple Watch via iCloud Reminders) with 4-tier list routing
+  (per-item, per-meeting, per-folder / automatic ReMeet folder mirroring into matching Reminders
+  lists that you can group under a `Work` folder in Apple Reminders, and global default),
+  one-click whole-folder sync, natural-language due-date parsing, and `remeet://` deep links back
+  to the exact meeting timestamp.
 - **Walk-In Pre-Meeting Prep Brief:** opens before any recurring or invitee-matched meeting with
   one-click **Join &amp; Record**, attendee cards, **Last time** decisions/summary recap, open
   questions, and a mutual accountability check before you walk in.
@@ -93,8 +104,10 @@ account, no server and no subscription.
 **People &amp; voiceprints**
 
 - **People directory (`~/ReMeet/people.json`):** builds profiles automatically from speaker names
-  and calendar invites, tracking meeting counts, spoken time, voiceprint hours, free-form context
-  notes, and shared open commitments per person.
+  and calendar invites—deduplicating Teams/Outlook/Zoom `"Last, First [Middle]"` and ALL-CAPS
+  invite names, honorifics (`Dr.`/`Prof.`), and manual speaker labels with readable aliases and
+  one-click merge suggestions for ambiguous first names—while tracking meeting counts, spoken
+  time, voiceprint hours, free-form context notes, and shared open commitments per person.
 - **Smarter voice matching &amp; turn fixes:** matches WeSpeaker embeddings across meetings with
   calendar-invite ranking, tracks per-meeting voiceprint contributions so fixing a mislabelled
   speaker cleanly unlearns the wrong vector, and lets you click any turn or speaker chip to
@@ -154,7 +167,7 @@ Transcription is English only.
 Audio never leaves your Mac. Recording, speaker labels, speech recognition, Key Moments, people
 profiles, and search run locally, and meetings live as plain files in `~/ReMeet/meetings`.
 
-Two optional features make outbound text/HTTP requests only when you opt in:
+Three optional features run outside pure local files only when you opt in:
 
 - **Claude Code text pass:** if the [Claude Code](https://claude.com/claude-code) CLI is installed
   and signed in, ReMeet sends transcript text to Claude Sonnet for spelling cleanup and summaries
@@ -162,6 +175,9 @@ Two optional features make outbound text/HTTP requests only when you opt in:
 - **Subscribed calendar feeds:** if you paste `.ics` feed URLs in Schedule or Settings, ReMeet
   fetches read-only calendar events directly from those URLs to power reminders, attendee hints,
   and Walk-In Prep Briefs.
+- **Apple Reminders sync:** if you grant Reminders access, ReMeet reads and writes action items via
+  local macOS EventKit (which syncs across your Apple devices only if iCloud Reminders is enabled on
+  your Mac; nothing is sent to third-party servers).
 
 The only other network traffic is the initial model download from Hugging Face on first launch.
 
