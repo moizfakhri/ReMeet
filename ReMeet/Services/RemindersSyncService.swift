@@ -103,13 +103,6 @@ final class RemindersSyncService {
                 return a.title.localizedCaseInsensitiveCompare(b.title) == .orderedAscending
             }
         availableLists = lists
-
-        // First-time smart default: if a "Work" list already exists and no default was saved yet, select it.
-        if UserDefaults.standard.string(forKey: SettingsKey.defaultRemindersListID) == nil,
-           let research = lists.first(where: { $0.title.caseInsensitiveCompare("Work") == .orderedSame }) {
-            UserDefaults.standard.set(research.id, forKey: SettingsKey.defaultRemindersListID)
-            UserDefaults.standard.set(research.title, forKey: SettingsKey.defaultRemindersListName)
-        }
     }
 
     func defaultListID() -> String? {

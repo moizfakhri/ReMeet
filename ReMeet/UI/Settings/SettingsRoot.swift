@@ -379,10 +379,7 @@ private struct RemindersPane: View {
     @State private var accessDenied = RemindersSyncService.accessDenied
     @State private var syncStatus: String?
     @State private var isSyncingNow = false
-
-    private var hasWorkList: Bool {
-        model.reminders.listNamed("Work") != nil
-    }
+    @State private var newListName = ""
 
     var body: some View {
         Form {
@@ -441,13 +438,18 @@ private struct RemindersPane: View {
                         }
                     }
 
-                    if !hasWorkList {
-                        Button("Create \u{201C}Work\u{201D} List & Set as Default") {
-                            if let created = model.reminders.createList(named: "Work") {
+                    HStack(spacing: 8) {
+                        TextField("New list name (e.g. Work)", text: $newListName)
+                        Button("Create & Use") {
+                            let trimmed = newListName.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !trimmed.isEmpty else { return }
+                            if let created = model.reminders.createList(named: trimmed) {
                                 defaultListID = created.id
                                 defaultListName = created.title
+                                newListName = ""
                             }
                         }
+                        .disabled(newListName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                 }
 
