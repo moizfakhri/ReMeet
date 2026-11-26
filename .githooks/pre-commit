@@ -1,0 +1,4 @@
+#!/bin/zsh
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+exec "$ROOT/scripts/privacy-check.sh" --staged

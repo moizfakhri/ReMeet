@@ -1,0 +1,19 @@
+name: Privacy Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  privacy-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 25
+
+      - name: Run privacy check
+        run: bash scripts/privacy-check.sh --all

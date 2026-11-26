@@ -216,6 +216,8 @@ signing team.
 scripts/build.sh                                # Release build into build/
 swift test --package-path Packages/ReMeetKit    # unit tests
 scripts/selftests.sh                            # in-app self-tests against the Release build
+scripts/privacy-check.sh --all                  # scan tracked files & commit emails for private data
+git config core.hooksPath .githooks             # enable pre-commit & pre-push privacy hooks
 ```
 
 ```
